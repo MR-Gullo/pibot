@@ -1,48 +1,37 @@
 # Phone Robot Agent Demo
 
-Goal: prove continuous-ish STT + `pi-agent-core` harness + simulated robot movement tools.
+Android phone as robot face/camera/mic/speaker; Node server runs the LLM agent; FT232H/WebUSB motor control is separate for now.
 
-## STT choice for the proof-out
-
-Fastest demo: browser Web Speech API (`SpeechRecognition` / `webkitSpeechRecognition`) in Android Chrome.
-
-Pros: no server audio plumbing, easy permission flow.  
-Cons: browser/vendor dependent, often cloud-backed, not truly forever-continuous; it may stop and need restart logic.
-
-Later options:
-
-- Android native SpeechRecognizer in a small wrapper app/WebView
-- streaming Whisper/Groq/Deepgram server-side
-- local Vosk/Sherpa ONNX if offline matters
-
-## Run
+## Run web demo
 
 ```bash
-cd robot-llm
 npm install
-OPENAI_API_KEY=... npm run dev
+npm run dev
 ```
 
-Open locally:
+Open:
 
 ```text
 http://localhost:8010
 ```
 
-On phone, for STT only HTTP LAN is usually OK. For WebUSB/camera later, use HTTPS or Chrome's insecure-origin-as-secure flag.
+For phone access, expose port `8010` via ngrok HTTPS.
 
-## What it does
+## STT/TTS direction
 
-- Browser page has setup screen and robot face screen.
-- Continuous STT sends final utterances to the backend.
-- Backend uses `AgentHarness` from `@earendil-works/pi-agent-core`.
-- Tools are simulated and broadcast back to the UI:
-  - `move_forward`
-  - `move_backward`
-  - `turn_left`
-  - `turn_right`
-  - `stop`
-  - `set_expression`
-  - `take_photo` stub
+Browser Web Speech on Android is unreliable: it ends sessions after ~5s and fights TTS/audio focus.
 
-Motor/WebUSB integration is intentionally not connected here yet, so debugging the agent cannot move real hardware.
+Current investigation:
+
+- STT: Kyutai/Moshi streaming STT looks promising; official model is EN/FR, German works unofficially in the live demo.
+- TTS: Kyutai Pocket TTS supports German locally on CPU and has a working `/tts` server endpoint.
+
+Whisper/WhisperLiveKit experiments were removed.
+
+## Current tools
+
+- `move_forward`
+- `turn_left` / counter-clockwise rotate
+- `stop`
+- `take_photo`
+- `memory`

@@ -5,9 +5,6 @@
 	"type": "module",
 	"scripts": {
 		"dev": "node scripts/dev.mjs",
-		"build:stt": "node scripts/build-stt.mjs",
-		"download:stt-model": "node scripts/download-stt-model.mjs",
-		"stt:test": "node scripts/stt-test.mjs",
 		"compile:client": "esbuild src/client.ts --bundle --format=esm --target=es2022 --outfile=public/app.js",
 		"check": "biome check --write --error-on-warnings . && tsc --noEmit && npm run compile:client",
 		"typecheck": "tsc --noEmit",
