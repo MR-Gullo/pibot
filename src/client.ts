@@ -775,12 +775,8 @@ function createRobotVoiceEffect(audio: HTMLAudioElement): void {
 	}
 }
 
-function ttsOutputActive(): boolean {
-	return phase === "speaking" || (currentTtsAudio !== undefined && !currentTtsAudio.paused && !currentTtsAudio.ended);
-}
-
 function micInputBlocked(): boolean {
-	return Date.now() < ignoreMicUntil || ttsOutputActive();
+	return Date.now() < ignoreMicUntil;
 }
 
 function resampleToPcm16(input: Float32Array, inputSampleRate: number): Int16Array {

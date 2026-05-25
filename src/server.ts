@@ -24,6 +24,7 @@ import {
 } from "@earendil-works/pi-ai";
 import { WebSocket, WebSocketServer } from "ws";
 import { formatMemoriesForSystemPrompt, memoryTool } from "./memory.js";
+import { pageContentTool, webSearchTool } from "./websearch.js";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 const publicDir = resolve(__dirname, "../public");
@@ -201,6 +202,55 @@ function handleParakeetSttStdout(data: Buffer): void {
 	}
 }
 
+function normalizeForStopMatch(text: string): string {
+	return text
+		.toLowerCase()
+		.normalize("NFKD")
+		.replace(/[.,!?;:()[\]{}"'`´]/g, " ")
+		.replace(/\s+/g, " ")
+		.trim();
+}
+
+const stopWordPhrases = [
+	"stop",
+	"stopp",
+	"halt",
+	"anhalten",
+	"abbrechen",
+	"schluss",
+	"ruhe",
+	"sei still",
+	"sei ruhig",
+	"hör auf",
+	"hoer auf",
+];
+
+function looksLikeStopCommand(text: string): boolean {
+	const normalized = normalizeForStopMatch(text);
+	if (!normalized) return false;
+	for (const phrase of stopWordPhrases) {
+		if (normalized === phrase) return true;
+		if (normalized.startsWith(`${phrase} `)) return true;
+		if (normalized.endsWith(` ${phrase}`)) return true;
+		if (normalized.includes(` ${phrase} `)) return true;
+	}
+	return false;
+}
+
+async function performHarnessAbort(reason: string): Promise<void> {
+	console.log(`[abort] ${reason}`);
+	resolveAllSpeech();
+	rejectAllPhotos(reason);
+	rejectAllMotors(reason);
+	stopMotorsImmediate();
+	try {
+		await harness.abort();
+	} catch (error) {
+		console.warn(`[abort] harness abort error: ${error instanceof Error ? error.message : String(error)}`);
+	}
+	broadcast({ type: "sim_motor", command: "stop", durationMs: 0 });
+}
+
 function enqueueSttPrompt(text: string): void {
 	sttPromptQueue = sttPromptQueue.then(async () => {
 		for (let attempt = 1; attempt <= 30; attempt++) {
@@ -251,7 +301,13 @@ function handleParakeetSttMessage(message: SttWorkerMsg): void {
 		const text = message.text.trim();
 		console.log(`[stt] final #${message.index} decodeMs=${message.decodeMs} text=${JSON.stringify(text)}`);
 		broadcast({ type: "stt_final", text });
-		if (text) enqueueSttPrompt(text);
+		if (!text) return;
+		if (looksLikeStopCommand(text)) {
+			console.log(`[stt] stop-word detected, aborting current turn`);
+			void performHarnessAbort(`stop word: ${text}`);
+			return;
+		}
+		enqueueSttPrompt(text);
 		return;
 	}
 	console.warn(`[stt] worker error: ${message.message}`);
@@ -576,7 +632,15 @@ const takePhotoTool: AgentTool<typeof emptyParameters, PhotoToolDetails> = {
 	},
 };
 
-const tools: AgentTool[] = [moveForwardTool, turnLeftTool, turnLeftDegreesTool, takePhotoTool, memoryTool];
+const tools: AgentTool[] = [
+	moveForwardTool,
+	turnLeftTool,
+	turnLeftDegreesTool,
+	takePhotoTool,
+	webSearchTool,
+	pageContentTool,
+	memoryTool,
+];
 
 const session = await new InMemorySessionRepo().create({ id: "robot-demo" });
 const harness = new AgentHarness({
@@ -590,7 +654,7 @@ const harness = new AgentHarness({
 	},
 	tools,
 	systemPrompt:
-		async () => `Du bist das Gehirn eines kleinen Roboters mit Smartphone. Antworte immer auf Deutsch. Sei verspielt, freundlich und sicher. Verwende keine Emojis. Nutze Bewegungswerkzeuge nur für kurze Dauer. Die Bewegungswerkzeuge stoppen automatisch nach ihrer Dauer. Die Hardware kann nur vorwärts fahren und sich gegen den Uhrzeigersinn drehen; rückwärts und rechts gibt es nicht. Für ungefähre Drehwinkel nutze turn_left_degrees.
+		async () => `Du bist das Gehirn eines kleinen Roboters mit Smartphone. Antworte immer auf Deutsch. Sei verspielt, freundlich und sicher. Verwende keine Emojis. Nutze Bewegungswerkzeuge nur für kurze Dauer. Die Bewegungswerkzeuge stoppen automatisch nach ihrer Dauer. Die Hardware kann nur vorwärts fahren und sich gegen den Uhrzeigersinn drehen; rückwärts und rechts gibt es nicht. Für ungefähre Drehwinkel nutze turn_left_degrees. Wenn du aktuelle Fakten oder Internet-Informationen brauchst, nutze web_search. Wenn du Details aus einem gefundenen Treffer brauchst, nutze fetch_page_content mit der URL.
 
 Persistente Erinnerungen:
 ${await formatMemoriesForSystemPrompt()}
@@ -803,12 +867,7 @@ async function handleClientMessage(msg: ClientMsg): Promise<void> {
 	}
 	if (msg.type === "prompt") await harness.prompt(msg.text);
 	if (msg.type === "abort") {
-		resolveAllSpeech();
-		rejectAllPhotos("Aborted");
-		rejectAllMotors("Aborted");
-		stopMotorsImmediate();
-		await harness.abort();
-		broadcast({ type: "sim_motor", command: "stop", durationMs: 0 });
+		await performHarnessAbort("client abort");
 	}
 }
 

@@ -95,13 +95,25 @@ pre {
 
 .face {
 	--amp: 0;
+	--eye-top: #d7ffff;
+	--eye-mid: #58e8ff;
+	--eye-bot: #33a8ff;
+	--eye-glow: #66f4ff;
+	--eye-glow-soft: rgba(57, 216, 255, 0.45);
+	--eye-inset: rgba(0, 68, 120, 0.22);
+	--face-glow: rgba(64, 240, 255, 0.18);
+	--face-glow-amp: rgba(64, 240, 255, 0.55);
+	--brow-mid: #9ff5ff;
+	--brow-glow: rgba(190, 250, 255, 0.55);
 	position: relative;
 	width: 82vw;
 	height: 54vw;
 	max-width: 720px;
 	max-height: 460px;
-	filter: drop-shadow(0 0 calc(28px + 60px * var(--amp)) rgba(64, 240, 255, calc(0.18 + 0.4 * var(--amp))));
-	transition: filter 90ms linear, transform 160ms ease;
+	filter:
+		drop-shadow(0 0 28px var(--face-glow))
+		drop-shadow(0 0 calc(60px * var(--amp)) var(--face-glow-amp));
+	transition: filter 220ms ease, transform 160ms ease;
 }
 
 .eye {
@@ -109,14 +121,15 @@ pre {
 	top: 37%;
 	width: 24%;
 	height: 32%;
-	background: linear-gradient(180deg, #d7ffff, #58e8ff 58%, #33a8ff);
+	background: linear-gradient(180deg, var(--eye-top), var(--eye-mid) 58%, var(--eye-bot));
 	border-radius: 48% 48% 52% 52%;
 	box-shadow:
-		0 0 28px #66f4ff,
-		0 0 72px rgba(57, 216, 255, 0.45),
-		inset 0 -14px 24px rgba(0, 68, 120, 0.22);
+		0 0 28px var(--eye-glow),
+		0 0 72px var(--eye-glow-soft),
+		inset 0 -14px 24px var(--eye-inset);
 	transform-origin: center;
 	animation: idle-blink 5.5s infinite;
+	transition: box-shadow 220ms ease;
 }
 
 .eye.left {
@@ -132,10 +145,10 @@ pre {
 	top: 24%;
 	width: 28%;
 	height: 7%;
-	background: linear-gradient(90deg, #ffffff, #9ff5ff);
+	background: linear-gradient(90deg, #ffffff, var(--brow-mid));
 	border-radius: 999px;
-	box-shadow: 0 0 22px rgba(190, 250, 255, 0.55);
-	transition: transform 180ms ease, top 180ms ease;
+	box-shadow: 0 0 22px var(--brow-glow);
+	transition: transform 180ms ease, top 180ms ease, background 220ms ease, box-shadow 220ms ease;
 }
 
 .brow.left {
@@ -149,6 +162,14 @@ pre {
 }
 
 .face.idle {
+	--eye-mid: #58e8ff;
+	--eye-bot: #33a8ff;
+	--eye-glow: #66f4ff;
+	--eye-glow-soft: rgba(57, 216, 255, 0.45);
+	--face-glow: rgba(64, 240, 255, 0.18);
+	--face-glow-amp: rgba(64, 240, 255, 0.55);
+	--brow-mid: #9ff5ff;
+	--brow-glow: rgba(190, 250, 255, 0.55);
 	animation: idle-breathe 5.2s ease-in-out infinite;
 }
 
@@ -190,6 +211,17 @@ pre {
 	transform: rotate(-8deg);
 }
 
+.face.thinking {
+	--eye-mid: #b89aff;
+	--eye-bot: #6a4cff;
+	--eye-glow: #cdb8ff;
+	--eye-glow-soft: rgba(150, 120, 255, 0.5);
+	--face-glow: rgba(150, 120, 255, 0.2);
+	--face-glow-amp: rgba(150, 120, 255, 0.55);
+	--brow-mid: #d8c7ff;
+	--brow-glow: rgba(190, 170, 255, 0.5);
+}
+
 .face.thinking .eye {
 	animation: thinking-gaze 3.6s infinite ease-in-out, thinking-blink 6.2s infinite;
 	filter: brightness(0.92);
@@ -203,6 +235,17 @@ pre {
 .face.thinking .brow.right {
 	top: 22%;
 	transform: rotate(-4deg);
+}
+
+.face.speaking {
+	--eye-mid: #ff8ec1;
+	--eye-bot: #ff3d8b;
+	--eye-glow: #ffb7da;
+	--eye-glow-soft: rgba(255, 120, 180, 0.5);
+	--face-glow: rgba(255, 120, 180, 0.22);
+	--face-glow-amp: rgba(255, 120, 180, 0.6);
+	--brow-mid: #ffd0e6;
+	--brow-glow: rgba(255, 180, 210, 0.55);
 }
 
 .face.speaking .eye {
@@ -223,6 +266,14 @@ pre {
 }
 
 .face.tool {
+	--eye-mid: #b89aff;
+	--eye-bot: #6a4cff;
+	--eye-glow: #cdb8ff;
+	--eye-glow-soft: rgba(150, 120, 255, 0.5);
+	--face-glow: rgba(150, 120, 255, 0.2);
+	--face-glow-amp: rgba(150, 120, 255, 0.55);
+	--brow-mid: #d8c7ff;
+	--brow-glow: rgba(190, 170, 255, 0.5);
 	animation: tool-lean 420ms infinite alternate ease-in-out;
 }
 
@@ -231,20 +282,40 @@ pre {
 }
 
 .face.error {
-	filter: hue-rotate(130deg) saturate(1.6) drop-shadow(0 0 34px rgba(255, 90, 120, 0.4));
+	--eye-mid: #ff8a8a;
+	--eye-bot: #ff2b4f;
+	--eye-glow: #ff9aa0;
+	--eye-glow-soft: rgba(255, 80, 100, 0.55);
+	--face-glow: rgba(255, 80, 100, 0.25);
+	--face-glow-amp: rgba(255, 80, 100, 0.6);
+	--brow-mid: #ffc1c1;
+	--brow-glow: rgba(255, 170, 170, 0.5);
 	animation: error-shake 90ms 6;
-}
-
-.face.error .eye {
-	background: linear-gradient(180deg, #fff, #ff6b96);
-	box-shadow: 0 0 40px #ff4d88;
 }
 
 #back {
 	position: fixed;
-	top: 1rem;
-	right: 1rem;
-	opacity: 0.18;
+	top: 0;
+	right: 0;
+	width: clamp(96px, 22vw, 160px);
+	height: clamp(96px, 22vw, 160px);
+	background: transparent;
+	border: none;
+	color: #eee;
+	opacity: 0.12;
+	font-size: 0.85rem;
+	text-align: right;
+	padding: 0.6rem 0.8rem;
+	display: flex;
+	align-items: flex-start;
+	justify-content: flex-end;
+	cursor: pointer;
+}
+
+#back:focus,
+#back:hover {
+	opacity: 0.4;
+	outline: none;
 }
 
 .sim {
