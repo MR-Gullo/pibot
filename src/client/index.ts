@@ -1,34 +1,4 @@
-type MotorCommand = "forward" | "turn_left" | "turn_left_degrees" | "stop";
-
-type ServerMessage =
-	| { type: "hello"; motorLog: Array<{ t: number; command: string; durationMs: number }> }
-	| { type: "sim_motor"; command: string; durationMs: number }
-	| { type: "take_photo_request"; id: string }
-	| { type: "motor_request"; id: string; command: MotorCommand; durationMs: number; degrees?: number }
-	| { type: "error"; message: string }
-	| { type: "speak_request"; id: string; text: string }
-	| { type: "cancel_speech"; reason: string }
-	| {
-			type: "stt_event";
-			event: "loading" | "ready" | "speech_start" | "speech_end" | "speech_drop" | "error";
-			message?: string;
-	  }
-	| { type: "stt_interim"; text: string }
-	| { type: "stt_final"; text: string }
-	| { type: "session_reset" }
-	| { type: "agent_event"; event: AgentEvent };
-
-interface AgentMessageLike {
-	role: string;
-	content?: unknown;
-}
-
-type AgentEvent =
-	| { type: "message_start"; message: AgentMessageLike }
-	| { type: "message_update"; assistantMessageEvent?: { type: string; delta?: string } }
-	| { type: "message_end"; message: AgentMessageLike }
-	| { type: "tool_execution_start"; toolName: string; args: unknown }
-	| { type: "other"; eventType: string };
+import type { AgentMessageLike, MotorCommand, ServerMessage } from "../types.js";
 
 type ConversationPhase = "idle" | "listening" | "thinking" | "speaking";
 type RobotFaceState = "idle" | "listening" | "hearing" | "thinking" | "speaking" | "tool" | "error";
@@ -91,13 +61,19 @@ let micProcessor: ScriptProcessorNode | undefined;
 let assistantSpeechBuffer = "";
 let ttsEnabled = localStorage.getItem(ttsEnabledKey) === "true";
 let phase: ConversationPhase = "idle";
+let currentFaceState: RobotFaceState = "idle";
 let ignoreMicUntil = 0;
 let currentTtsAudio: HTMLAudioElement | undefined;
 let robotVoiceEffectCleanup: (() => void) | undefined;
 let audioContext: AudioContext | undefined;
 let ttsGeneration = 0;
 let activeSpeakRequestId: string | undefined;
-let suppressSttPhaseUntil = 0;
+let ttsSpeaking = false;
+let sttSpeechActive = false;
+let currentSttIndex: number | undefined;
+let ignoredSttIndex: number | undefined;
+let toolActiveUntil = 0;
+let errorUntil = 0;
 let cameraStream: MediaStream | undefined;
 let cameraVideo: HTMLVideoElement | undefined;
 const cameraEnabledKey = "robot-camera-enabled";
@@ -175,8 +151,33 @@ function send(data: unknown): void {
 	ws.send(JSON.stringify(data));
 }
 
-function setRobotFaceState(state: RobotFaceState): void {
-	robotFace.className = `face ${state}`;
+function deriveRobotFaceState(): RobotFaceState {
+	if (Date.now() < errorUntil) return "error";
+	if (ttsSpeaking) return "speaking";
+	if (sttSpeechActive && currentSttIndex !== ignoredSttIndex) return "hearing";
+	if (Date.now() < toolActiveUntil) return "tool";
+	if (phase === "thinking") return "thinking";
+	if (recognitionWanted) return "listening";
+	return "idle";
+}
+
+function renderRobotFace(): void {
+	const next = deriveRobotFaceState();
+	if (next === currentFaceState) return;
+	currentFaceState = next;
+	robotFace.className = `face ${next}`;
+}
+
+function showToolFor(durationMs: number): void {
+	toolActiveUntil = Math.max(toolActiveUntil, Date.now() + Math.max(250, durationMs));
+	renderRobotFace();
+	setTimeout(renderRobotFace, Math.max(250, durationMs) + 20);
+}
+
+function showErrorFor(durationMs: number): void {
+	errorUntil = Date.now() + durationMs;
+	renderRobotFace();
+	setTimeout(renderRobotFace, durationMs + 20);
 }
 
 async function ensureCameraStream(): Promise<MediaStream> {
@@ -634,12 +635,28 @@ async function handlePhotoRequest(id: string): Promise<void> {
 }
 
 function setPhase(nextPhase: ConversationPhase): void {
-	phase = nextPhase;
-	if (nextPhase === "idle") setRobotFaceState("idle");
-	if (nextPhase === "listening") setRobotFaceState("listening");
-	if (nextPhase === "thinking") setRobotFaceState("thinking");
-	if (nextPhase === "speaking") setRobotFaceState("speaking");
-	log(`phase: ${phase}`);
+	if (phase !== nextPhase) {
+		phase = nextPhase;
+		log(`phase: ${phase}`);
+	}
+	renderRobotFace();
+}
+
+function setSttSpeechActive(active: boolean, index?: number): void {
+	sttSpeechActive = active;
+	if (index !== undefined) currentSttIndex = index;
+	if (!active && (index === undefined || currentSttIndex === index)) currentSttIndex = undefined;
+	renderRobotFace();
+}
+
+function setTtsSpeaking(active: boolean): void {
+	ttsSpeaking = active;
+	if (active) ignoredSttIndex = undefined;
+	renderRobotFace();
+}
+
+function resetToListeningOrIdle(): void {
+	setPhase(recognitionWanted ? "listening" : "idle");
 }
 
 function assistantMessageHasToolCall(message: AgentMessageLike): boolean {
@@ -855,28 +872,21 @@ function resetRecognitionAfterTts(): void {
 	if (recognitionWanted) setPhase("listening");
 }
 
-function ttsAudioActive(): boolean {
-	return currentTtsAudio !== undefined;
-}
-
-function sttPhaseSuppressed(): boolean {
-	return Date.now() < suppressSttPhaseUntil;
-}
-
 function interruptTtsOnly(): void {
 	ttsGeneration++;
 	clearCurrentTtsAudio();
 	if ("speechSynthesis" in window) window.speechSynthesis.cancel();
 }
 
-function cancelSpeechFromServer(reason: string): void {
+function cancelSpeechFromServer(reason: string, sttIndex?: number): void {
 	const requestId = activeSpeakRequestId;
 	interruptTtsOnly();
+	setTtsSpeaking(false);
+	if (sttIndex !== undefined) ignoredSttIndex = sttIndex;
 	activeSpeakRequestId = undefined;
 	if (requestId) send({ type: "speak_cancelled", id: requestId });
 	ignoreMicUntil = Date.now() + 500;
-	suppressSttPhaseUntil = Date.now() + 5000;
-	setPhase(recognitionWanted ? "listening" : "idle");
+	resetToListeningOrIdle();
 	log(`TTS cancelled by server: ${reason}`, "stt");
 }
 
@@ -892,13 +902,14 @@ function stopLocalMotorsNow(): void {
 function abortCurrentAgentTurn(): void {
 	const requestId = activeSpeakRequestId;
 	interruptTtsOnly();
+	setTtsSpeaking(false);
 	stopLocalMotorsNow();
 	if (requestId) send({ type: "speak_cancelled", id: requestId });
 	activeSpeakRequestId = undefined;
 	ignoreMicUntil = Date.now() + 500;
-	setRobotFaceState("error");
+	showErrorFor(700);
 	send({ type: "abort" });
-	setPhase(recognitionWanted ? "listening" : "idle");
+	resetToListeningOrIdle();
 	resetRecognitionAfterTts();
 	log("agent turn aborted by touch", "stt");
 }
@@ -910,11 +921,12 @@ function enableTts(): void {
 
 function finishTts(message: string): void {
 	clearCurrentTtsAudio();
+	setTtsSpeaking(false);
 	const requestId = activeSpeakRequestId;
 	activeSpeakRequestId = undefined;
 	if (requestId) send({ type: "speak_done", id: requestId });
 	ignoreMicUntil = Date.now() + 500;
-	setPhase(recognitionWanted ? "listening" : "idle");
+	resetToListeningOrIdle();
 	resetRecognitionAfterTts();
 	log(message, "stt");
 }
@@ -939,6 +951,7 @@ function speakGerman(text: string, requestId?: string): void {
 	const providerLabel = ttsProviderLabel(provider);
 	activeSpeakRequestId = requestId;
 	clearCurrentTtsAudio();
+	setTtsSpeaking(true);
 	setPhase("speaking");
 	ignoreMicUntil = 0;
 
@@ -1021,7 +1034,12 @@ ws.onmessage = (event) => {
 	const message = JSON.parse(String(event.data)) as ServerMessage;
 	if (message.type === "sim_motor") {
 		log(`MOTOR ${message.command} ${message.durationMs}ms`, "sim");
-		setRobotFaceState(message.command === "stop" ? "listening" : "tool");
+		if (message.command === "stop") {
+			toolActiveUntil = 0;
+			renderRobotFace();
+		} else {
+			showToolFor(message.durationMs);
+		}
 	}
 	if (message.type === "take_photo_request") {
 		log(`photo requested ${message.id}`, "agent");
@@ -1031,7 +1049,8 @@ ws.onmessage = (event) => {
 		void handleMotorRequest(message.id, message.command, message.durationMs, message.degrees);
 	}
 	if (message.type === "error") {
-		setPhase(recognitionWanted ? "listening" : "idle");
+		showErrorFor(1500);
+		resetToListeningOrIdle();
 		log(`ERROR ${message.message}`);
 	}
 	if (message.type === "speak_request") {
@@ -1039,43 +1058,48 @@ ws.onmessage = (event) => {
 		else send({ type: "speak_done", id: message.id });
 	}
 	if (message.type === "cancel_speech") {
-		cancelSpeechFromServer(message.reason);
+		cancelSpeechFromServer(message.reason, message.sttIndex);
 	}
 	if (message.type === "stt_event") {
+		const index = message.index;
+		const ignored = index !== undefined && index === ignoredSttIndex;
 		if (message.event === "loading") log("local STT loading Parakeet/Silero worker", "stt");
 		if (message.event === "ready") log("local STT worker ready", "stt");
 		if (message.event === "speech_start") {
-			if (!ttsAudioActive() && !sttPhaseSuppressed()) setRobotFaceState("hearing");
+			setSttSpeechActive(!ignored, index);
 			log("STT speech started", "stt");
 		}
 		if (message.event === "speech_end") {
-			if (!ttsAudioActive() && !sttPhaseSuppressed()) setPhase("thinking");
+			setSttSpeechActive(false, index);
+			if (!ignored) setPhase("thinking");
 			log("STT speech ended, transcribing", "stt");
 		}
-		if (message.event === "speech_drop" && !ttsAudioActive() && !sttPhaseSuppressed()) {
-			setPhase(recognitionWanted ? "listening" : "idle");
+		if (message.event === "speech_drop") {
+			setSttSpeechActive(false, index);
+			if (!ignored) resetToListeningOrIdle();
 		}
 		if (message.event === "error") {
+			showErrorFor(1500);
 			setPhase("idle");
-			setRobotFaceState("error");
 			log(`STT error ${message.message ?? "unknown"}`, "stt");
 		}
 	}
 	if (message.type === "session_reset") {
 		log("server confirmed session reset; context cleared", "agent");
-		setPhase(recognitionWanted ? "listening" : "idle");
+		resetToListeningOrIdle();
 		return;
 	}
 	if (message.type === "stt_interim") {
 		if (message.text.trim()) log(`STT interim: ${message.text}`, "stt");
 	}
 	if (message.type === "stt_final") {
-		log(`STT final: ${message.text || "-"}`, "stt");
-		if (sttPhaseSuppressed()) {
-			setPhase(recognitionWanted ? "listening" : "idle");
-			return;
-		}
-		if (!message.text.trim() && !ttsAudioActive()) setPhase(recognitionWanted ? "listening" : "idle");
+		log(
+			`STT final: ${message.text || "-"}${message.accepted ? "" : ` (ignored: ${message.ignoredReason ?? "unknown"})`}`,
+			"stt",
+		);
+		setSttSpeechActive(false, message.index);
+		if (message.index === ignoredSttIndex) ignoredSttIndex = undefined;
+		if (!message.accepted) resetToListeningOrIdle();
 	}
 	if (message.type === "agent_event") {
 		const agentEvent = message.event;
@@ -1093,6 +1117,7 @@ ws.onmessage = (event) => {
 			if (!ttsEnabled) setPhase(recognitionWanted ? "listening" : "idle");
 		}
 		if (agentEvent.type === "tool_execution_start") {
+			showToolFor(1500);
 			log(`tool ${agentEvent.toolName} ${JSON.stringify(agentEvent.args)}`, "agent");
 		}
 	}

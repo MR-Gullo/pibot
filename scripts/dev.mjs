@@ -17,7 +17,7 @@ function log(message) {
 
 async function compileClient() {
 	await esbuild.build({
-		entryPoints: [resolve(root, "src/client.ts")],
+		entryPoints: [resolve(root, "src/client/index.ts")],
 		bundle: true,
 		format: "esm",
 		target: "es2022",
@@ -27,7 +27,7 @@ async function compileClient() {
 }
 
 function startServer() {
-	server = spawn("node", ["--import", "tsx", resolve(root, "src/server.ts")], {
+	server = spawn("node", ["--import", "tsx", resolve(root, "src/server/index.ts")], {
 		cwd: root,
 		env: process.env,
 		stdio: "inherit",
