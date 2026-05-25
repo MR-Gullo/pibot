@@ -1,7 +1,10 @@
+type MotorCommand = "forward" | "turn_left" | "turn_left_degrees" | "stop";
+
 type ServerMessage =
 	| { type: "hello"; motorLog: Array<{ t: number; command: string; durationMs: number }> }
 	| { type: "sim_motor"; command: string; durationMs: number }
 	| { type: "take_photo_request"; id: string }
+	| { type: "motor_request"; id: string; command: MotorCommand; durationMs: number; degrees?: number }
 	| { type: "error"; message: string }
 	| { type: "speak_request"; id: string; text: string }
 	| {
@@ -40,6 +43,8 @@ const stopMicButton = document.querySelector<HTMLButtonElement>("#stopMic");
 const ttsProviderSelect = document.querySelector<HTMLSelectElement>("#ttsProvider");
 const testTtsButton = document.querySelector<HTMLButtonElement>("#testTts");
 const enableCameraButton = document.querySelector<HTMLButtonElement>("#enableCamera");
+const startAllButton = document.querySelector<HTMLButtonElement>("#startAll");
+const gyroStatusEl = document.querySelector<HTMLElement>("#gyroStatus");
 
 if (
 	!setup ||
@@ -54,14 +59,19 @@ if (
 	!stopMicButton ||
 	!ttsProviderSelect ||
 	!testTtsButton ||
-	!enableCameraButton
+	!enableCameraButton ||
+	!startAllButton ||
+	!gyroStatusEl
 ) {
 	throw new Error("Missing required DOM elements");
 }
 
 const logOutput = logEl;
 const robotFace = face;
+const setupSection = setup;
+const robotSection = robot;
 const ttsProviderControl = ttsProviderSelect;
+const gyroStatus = gyroStatusEl;
 const wsProtocol = location.protocol === "https:" ? "wss" : "ws";
 const ws = new WebSocket(`${wsProtocol}://${location.host}`);
 const ttsEnabledKey = "robot-tts-enabled";
@@ -214,6 +224,397 @@ async function capturePhotoDataUrl(): Promise<string> {
 	return canvas.toDataURL("image/jpeg", 0.82);
 }
 
+interface USBControlTransferParameters {
+	requestType: "standard" | "class" | "vendor";
+	recipient: "device" | "interface" | "endpoint" | "other";
+	request: number;
+	value: number;
+	index: number;
+}
+
+interface USBOutTransferResult {
+	status: "ok" | "stall" | "babble";
+	bytesWritten: number;
+}
+
+interface USBEndpoint {
+	endpointNumber: number;
+	direction: "in" | "out";
+	type: "bulk" | "interrupt" | "isochronous";
+}
+
+interface USBAlternateInterface {
+	endpoints: USBEndpoint[];
+}
+
+interface USBInterface {
+	interfaceNumber?: number;
+	alternate: USBAlternateInterface;
+}
+
+interface USBConfiguration {
+	interfaces: USBInterface[];
+}
+
+interface USBDevice {
+	vendorId: number;
+	productId: number;
+	productName?: string;
+	configuration: USBConfiguration | null;
+	open(): Promise<void>;
+	selectConfiguration(value: number): Promise<void>;
+	claimInterface(value: number): Promise<void>;
+	controlTransferOut(setup: USBControlTransferParameters): Promise<USBOutTransferResult>;
+	transferOut(endpointNumber: number, data: BufferSource): Promise<USBOutTransferResult>;
+}
+
+interface USB {
+	getDevices(): Promise<USBDevice[]>;
+	requestDevice(options: { filters: Array<{ vendorId?: number; productId?: number }> }): Promise<USBDevice>;
+}
+
+declare global {
+	interface Navigator {
+		readonly usb?: USB;
+	}
+}
+
+const FTDI_VENDOR = 0x0403;
+const FT232H_PRODUCT = 0x6014;
+const SIO_RESET = 0x00;
+const SIO_SET_BITMODE = 0x0b;
+const BITMODE_RESET = 0x00;
+const BITMODE_BITBANG = 0x01;
+const FT232H_INTERFACE_A = 1;
+const FT232H_D4 = 0x10;
+const FT232H_D5 = 0x20;
+const FT232H_FORWARD_PIN = FT232H_D5;
+const FT232H_TURN_LEFT_PIN = FT232H_D4;
+const FT232H_DIRECTION_MASK = FT232H_D4 | FT232H_D5;
+
+let ftDevice: USBDevice | undefined;
+let ftOutEndpoint = 0x02;
+let ftConnected = false;
+let motorStopTimer: ReturnType<typeof setTimeout> | undefined;
+let motorGeneration = 0;
+let orientationTracking = false;
+let currentHeading: number | undefined;
+let currentHeadingAt = 0;
+let currentOrientationAlpha: number | null = null;
+let currentOrientationBeta: number | null = null;
+let currentOrientationGamma: number | null = null;
+let currentCompassHeading: number | undefined;
+let orientationSampleCount = 0;
+
+async function ftControl(request: number, value: number, index = FT232H_INTERFACE_A): Promise<void> {
+	if (!ftDevice) throw new Error("FT232H not connected");
+	const result = await ftDevice.controlTransferOut({
+		requestType: "vendor",
+		recipient: "device",
+		request,
+		value,
+		index,
+	});
+	if (result.status !== "ok") throw new Error(`FT232H controlTransferOut failed: ${result.status}`);
+}
+
+async function ftSetBitbang(enabled: boolean): Promise<void> {
+	const mode = enabled ? BITMODE_BITBANG : BITMODE_RESET;
+	await ftControl(SIO_SET_BITMODE, FT232H_DIRECTION_MASK | (mode << 8));
+}
+
+async function ftWritePins(value: number): Promise<void> {
+	if (!ftDevice) throw new Error("FT232H not connected");
+	const result = await ftDevice.transferOut(ftOutEndpoint, new Uint8Array([value]));
+	if (result.status !== "ok") throw new Error(`FT232H transferOut failed: ${result.status}`);
+}
+
+async function connectFt232h(promptIfMissing: boolean): Promise<boolean> {
+	const usb = navigator.usb;
+	if (!usb) {
+		log("WebUSB unavailable; motors cannot run", "agent");
+		return false;
+	}
+	try {
+		let device = (await usb.getDevices()).find(
+			(entry) => entry.vendorId === FTDI_VENDOR && entry.productId === FT232H_PRODUCT,
+		);
+		if (!device && promptIfMissing) {
+			device = await usb.requestDevice({
+				filters: [{ vendorId: FTDI_VENDOR, productId: FT232H_PRODUCT }],
+			});
+		}
+		if (!device) return false;
+		ftDevice = device;
+		await device.open();
+		if (device.configuration === null) await device.selectConfiguration(1);
+		const interfaces = device.configuration?.interfaces ?? [];
+		log(
+			`FT232H interfaces: ${interfaces
+				.map(
+					(iface, index) =>
+						`#${index}/n=${iface.interfaceNumber ?? index}/eps=${iface.alternate.endpoints
+							.map((endpoint) => `${endpoint.direction}:${endpoint.type}:${endpoint.endpointNumber}`)
+							.join(",")}`,
+				)
+				.join(" | ")}`,
+			"agent",
+		);
+
+		const claimedInterfaceNumber = interfaces[0]?.interfaceNumber ?? 0;
+		await device.claimInterface(claimedInterfaceNumber);
+		const endpoint = interfaces[0]?.alternate.endpoints.find(
+			(entry) => entry.direction === "out" && entry.type === "bulk",
+		);
+		if (!endpoint) throw new Error("FT232H bulk OUT endpoint not found after claiming interface");
+		ftOutEndpoint = endpoint.endpointNumber;
+
+		await ftControl(SIO_RESET, 0);
+		await ftSetBitbang(true);
+		await ftWritePins(0);
+		ftConnected = true;
+		log(
+			`FT232H connected: ${device.productName ?? "FT232H"} interface=${claimedInterfaceNumber} ep=${ftOutEndpoint}`,
+			"agent",
+		);
+		return true;
+	} catch (error) {
+		ftDevice = undefined;
+		ftConnected = false;
+		log(`FT232H connect failed: ${error instanceof Error ? error.message : String(error)}`, "agent");
+		return false;
+	}
+}
+
+function normalizeDegrees(value: number): number {
+	return ((value % 360) + 360) % 360;
+}
+
+type TurnDirection = 1 | -1;
+
+function turnProgressDegrees(start: number, current: number, direction: TurnDirection): number {
+	return direction === 1 ? normalizeDegrees(current - start) : normalizeDegrees(start - current);
+}
+
+function delay(ms: number): Promise<void> {
+	return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function formatDegrees(value: number | null | undefined): string {
+	return typeof value === "number" && Number.isFinite(value) ? `${value.toFixed(1)}°` : "-";
+}
+
+function updateGyroStatus(): void {
+	gyroStatus.textContent = `Gyro: heading=${formatDegrees(currentHeading)} alpha=${formatDegrees(currentOrientationAlpha)} beta=${formatDegrees(currentOrientationBeta)} gamma=${formatDegrees(currentOrientationGamma)} compass=${formatDegrees(currentCompassHeading)}`;
+}
+
+function handleOrientation(event: DeviceOrientationEvent): void {
+	const withCompass = event as DeviceOrientationEvent & { webkitCompassHeading?: number };
+	currentOrientationAlpha = event.alpha;
+	currentOrientationBeta = event.beta;
+	currentOrientationGamma = event.gamma;
+	currentCompassHeading =
+		typeof withCompass.webkitCompassHeading === "number" && Number.isFinite(withCompass.webkitCompassHeading)
+			? normalizeDegrees(withCompass.webkitCompassHeading)
+			: undefined;
+	const heading = currentCompassHeading ?? event.alpha;
+	if (typeof heading === "number" && Number.isFinite(heading)) {
+		currentHeading = normalizeDegrees(heading);
+		currentHeadingAt = Date.now();
+		orientationSampleCount++;
+	}
+	updateGyroStatus();
+}
+
+async function startOrientationTracking(): Promise<boolean> {
+	if (orientationTracking) return true;
+	if (!("DeviceOrientationEvent" in window)) {
+		log("Device orientation unavailable; degree turns disabled", "agent");
+		return false;
+	}
+	const orientationCtor = DeviceOrientationEvent as unknown as {
+		requestPermission?: () => Promise<"granted" | "denied" | "prompt">;
+	};
+	if (orientationCtor.requestPermission) {
+		const permission = await orientationCtor.requestPermission();
+		if (permission !== "granted") {
+			log(`Device orientation permission not granted: ${permission}`, "agent");
+			return false;
+		}
+	}
+	window.addEventListener("deviceorientation", handleOrientation);
+	orientationTracking = true;
+	updateGyroStatus();
+	await waitForHeading(1200);
+	log(
+		`Orientation tracking ${currentHeading === undefined ? "started without heading yet" : `heading=${currentHeading.toFixed(1)}°`}`,
+		"agent",
+	);
+	return true;
+}
+
+async function waitForHeading(
+	timeoutMs: number,
+	options: { allowStale?: boolean; afterSample?: number } = {},
+): Promise<number | undefined> {
+	const start = Date.now();
+	while (Date.now() - start < timeoutMs) {
+		const hasRequestedSample = options.afterSample === undefined || orientationSampleCount > options.afterSample;
+		if (currentHeading !== undefined && hasRequestedSample) {
+			if (options.allowStale || Date.now() - currentHeadingAt < 1500) return currentHeading;
+		}
+		await delay(50);
+	}
+	return options.allowStale ? currentHeading : undefined;
+}
+
+function motorCommandPins(command: MotorCommand): number {
+	if (command === "forward") return FT232H_FORWARD_PIN;
+	if (command === "turn_left" || command === "turn_left_degrees") return FT232H_TURN_LEFT_PIN;
+	return 0;
+}
+
+async function stopMotorPins(): Promise<void> {
+	await ftWritePins(0);
+}
+
+async function pulseTurnLeft(pulseMs: number): Promise<void> {
+	await ftWritePins(FT232H_TURN_LEFT_PIN);
+	await delay(pulseMs);
+	await stopMotorPins();
+}
+
+function chooseTurnDirection(
+	startHeading: number,
+	current: number,
+	previousDirection: TurnDirection | undefined,
+): TurnDirection {
+	if (previousDirection) return previousDirection;
+	const positive = turnProgressDegrees(startHeading, current, 1);
+	const negative = turnProgressDegrees(startHeading, current, -1);
+	if (positive < 180 && negative >= 180) return 1;
+	if (negative < 180 && positive >= 180) return -1;
+	if (positive < 180 && negative < 180) return positive >= negative ? 1 : -1;
+	return 1;
+}
+
+async function pulseTurnFallback(untilMs: number, generation: number, reason: string): Promise<void> {
+	const startedAt = Date.now();
+	log(`gyro fallback timed pulse turn: ${reason}`, "sim");
+	while (generation === motorGeneration && Date.now() - startedAt < untilMs) {
+		await pulseTurnLeft(Math.min(180, Math.max(40, untilMs - (Date.now() - startedAt))));
+		await delay(120);
+	}
+}
+
+async function turnLeftByDegrees(degrees: number, maxDurationMs: number, generation: number): Promise<void> {
+	const startHeading = await waitForHeading(1500, { allowStale: true });
+	const targetDegrees = Math.max(1, Math.min(359, degrees));
+	const startedAt = Date.now();
+	const pulseMs = 140;
+	const settleMs = 180;
+	let turned = 0;
+	let direction: TurnDirection | undefined;
+	let missedFreshSamples = 0;
+	if (startHeading === undefined) {
+		await pulseTurnFallback(maxDurationMs, generation, "no initial heading");
+		return;
+	}
+	try {
+		while (generation === motorGeneration && Date.now() - startedAt < maxDurationMs) {
+			const sampleBeforePulse = orientationSampleCount;
+			await pulseTurnLeft(pulseMs);
+			await delay(settleMs);
+			const heading = await waitForHeading(450, { allowStale: true, afterSample: sampleBeforePulse });
+			if (heading === undefined) {
+				missedFreshSamples++;
+				if (missedFreshSamples >= 3) break;
+				continue;
+			}
+			if (orientationSampleCount <= sampleBeforePulse) missedFreshSamples++;
+			else missedFreshSamples = 0;
+			direction = chooseTurnDirection(startHeading, heading, direction);
+			turned = turnProgressDegrees(startHeading, heading, direction);
+			log(
+				`gyro pulse target=${targetDegrees.toFixed(1)}° turned≈${turned.toFixed(1)}° heading=${heading.toFixed(1)}° dir=${direction} fresh=${orientationSampleCount > sampleBeforePulse}`,
+				"sim",
+			);
+			if (turned >= targetDegrees || missedFreshSamples >= 3) break;
+		}
+		if (turned < targetDegrees && generation === motorGeneration) {
+			const remainingMs = Math.max(0, maxDurationMs - (Date.now() - startedAt));
+			await pulseTurnFallback(
+				remainingMs,
+				generation,
+				`gyro progress stopped at ${turned.toFixed(1)}°/${targetDegrees.toFixed(1)}°`,
+			);
+		}
+	} finally {
+		await stopMotorPins();
+	}
+	if (generation !== motorGeneration) throw new Error("Degree turn aborted");
+	log(`gyro turn_left_degrees target=${targetDegrees.toFixed(1)}° actual≈${turned.toFixed(1)}°`, "sim");
+}
+
+async function handleMotorRequest(
+	id: string,
+	command: MotorCommand,
+	durationMs: number,
+	degrees?: number,
+): Promise<void> {
+	const generation = ++motorGeneration;
+	if (motorStopTimer) {
+		clearTimeout(motorStopTimer);
+		motorStopTimer = undefined;
+	}
+	if (!ftConnected) {
+		send({ type: "motor_result", id, ok: false, error: "FT232H not connected" });
+		return;
+	}
+	try {
+		if (command === "turn_left_degrees") {
+			await turnLeftByDegrees(Number(degrees ?? 45), durationMs, generation);
+			send({ type: "motor_result", id, ok: true });
+			return;
+		}
+		const pins = motorCommandPins(command);
+		await ftWritePins(pins);
+		log(`motor ${command} pins=0b${pins.toString(2).padStart(8, "0")} duration=${durationMs}ms`, "sim");
+		if (durationMs > 0 && pins !== 0) {
+			await new Promise<void>((resolve) => {
+				motorStopTimer = setTimeout(async () => {
+					motorStopTimer = undefined;
+					try {
+						await stopMotorPins();
+					} catch (error) {
+						log(`motor stop failed: ${error instanceof Error ? error.message : String(error)}`, "agent");
+					}
+					resolve();
+				}, durationMs);
+			});
+		}
+		send({ type: "motor_result", id, ok: true });
+	} catch (error) {
+		const message = error instanceof Error ? error.message : String(error);
+		log(`motor request failed: ${message}`, "agent");
+		send({ type: "motor_result", id, ok: false, error: message });
+		try {
+			await stopMotorPins();
+		} catch {
+			// best-effort
+		}
+	}
+}
+
+window.addEventListener("beforeunload", () => {
+	if (!ftDevice) return;
+	try {
+		ftDevice.transferOut(ftOutEndpoint, new Uint8Array([0]));
+	} catch {
+		// best-effort
+	}
+});
+
 async function handlePhotoRequest(id: string): Promise<void> {
 	try {
 		const dataUrl = await capturePhotoDataUrl();
@@ -240,6 +641,33 @@ function assistantMessageHasToolCall(message: AgentMessageLike): boolean {
 	return message.content.some(
 		(content) => typeof content === "object" && content !== null && "type" in content && content.type === "toolCall",
 	);
+}
+
+function startFaceAmpLoop(analyser: AnalyserNode): () => void {
+	const data = new Uint8Array(analyser.fftSize);
+	let smoothed = 0;
+	let frameHandle = 0;
+	let stopped = false;
+	const tick = () => {
+		if (stopped) return;
+		analyser.getByteTimeDomainData(data);
+		let sum = 0;
+		for (const sample of data) {
+			const centered = (sample - 128) / 128;
+			sum += centered * centered;
+		}
+		const rms = Math.sqrt(sum / data.length);
+		const amp = Math.min(1, rms * 3.4);
+		smoothed = smoothed * 0.55 + amp * 0.45;
+		robotFace.style.setProperty("--amp", smoothed.toFixed(3));
+		frameHandle = requestAnimationFrame(tick);
+	};
+	frameHandle = requestAnimationFrame(tick);
+	return () => {
+		stopped = true;
+		cancelAnimationFrame(frameHandle);
+		robotFace.style.setProperty("--amp", "0");
+	};
 }
 
 function clearCurrentTtsAudio(): void {
@@ -294,6 +722,9 @@ function createRobotVoiceEffect(audio: HTMLAudioElement): void {
 		slapWet.gain.value = 0.045;
 		const output = audioContext.createGain();
 		output.gain.value = 0.98;
+		const analyser = audioContext.createAnalyser();
+		analyser.fftSize = 512;
+		analyser.smoothingTimeConstant = 0.55;
 
 		source.connect(highpass);
 		highpass.connect(lowpass);
@@ -308,8 +739,17 @@ function createRobotVoiceEffect(audio: HTMLAudioElement): void {
 		slap.connect(slapWet);
 		slapWet.connect(output);
 		output.connect(audioContext.destination);
+		output.connect(analyser);
+
+		const stopAmpLoop = startFaceAmpLoop(analyser);
+
 		robotVoiceEffectCleanup = () => {
-			ringOsc.stop();
+			stopAmpLoop();
+			try {
+				ringOsc.stop();
+			} catch {
+				// already stopped
+			}
 			for (const node of [
 				source,
 				highpass,
@@ -323,6 +763,7 @@ function createRobotVoiceEffect(audio: HTMLAudioElement): void {
 				slap,
 				slapWet,
 				output,
+				analyser,
 			]) {
 				node.disconnect();
 			}
@@ -418,9 +859,19 @@ function interruptTtsOnly(): void {
 	if ("speechSynthesis" in window) window.speechSynthesis.cancel();
 }
 
-function interruptSpeech(): void {
+function stopLocalMotorsNow(): void {
+	motorGeneration++;
+	if (motorStopTimer) {
+		clearTimeout(motorStopTimer);
+		motorStopTimer = undefined;
+	}
+	if (ftConnected) void stopMotorPins().catch(() => undefined);
+}
+
+function abortCurrentAgentTurn(): void {
 	const requestId = activeSpeakRequestId;
 	interruptTtsOnly();
+	stopLocalMotorsNow();
 	if (requestId) send({ type: "speak_cancelled", id: requestId });
 	activeSpeakRequestId = undefined;
 	ignoreMicUntil = Date.now() + 500;
@@ -428,7 +879,7 @@ function interruptSpeech(): void {
 	send({ type: "abort" });
 	setPhase(recognitionWanted ? "listening" : "idle");
 	resetRecognitionAfterTts();
-	log("TTS stopped, agent aborted", "stt");
+	log("agent turn aborted by touch", "stt");
 }
 
 function enableTts(): void {
@@ -529,12 +980,15 @@ ws.onerror = () => log("ws error", "agent");
 ws.onmessage = (event) => {
 	const message = JSON.parse(String(event.data)) as ServerMessage;
 	if (message.type === "sim_motor") {
-		log(`SIM MOTOR ${message.command} ${message.durationMs}ms`, "sim");
+		log(`MOTOR ${message.command} ${message.durationMs}ms`, "sim");
 		setRobotFaceState(message.command === "stop" ? "listening" : "tool");
 	}
 	if (message.type === "take_photo_request") {
 		log(`photo requested ${message.id}`, "agent");
 		void handlePhotoRequest(message.id);
+	}
+	if (message.type === "motor_request") {
+		void handleMotorRequest(message.id, message.command, message.durationMs, message.degrees);
 	}
 	if (message.type === "error") {
 		setPhase(recognitionWanted ? "listening" : "idle");
@@ -594,13 +1048,43 @@ sendButton.onclick = () => {
 	log(`typed: ${text}`);
 };
 
-robotModeButton.onclick = async () => {
-	setup.hidden = true;
-	robot.hidden = false;
+async function enterRobotMode(): Promise<void> {
+	setupSection.hidden = true;
+	robotSection.hidden = false;
 	try {
 		if (!document.fullscreenElement) await document.documentElement.requestFullscreen();
 	} catch (error) {
 		log(`Fullscreen request failed: ${error instanceof Error ? error.message : String(error)}`);
+	}
+}
+
+robotModeButton.onclick = () => {
+	void enterRobotMode();
+};
+
+startAllButton.onclick = async () => {
+	startAllButton.disabled = true;
+	const previousLabel = startAllButton.textContent;
+	startAllButton.textContent = "Starte...";
+	try {
+		enableTts();
+		log(`TTS enabled: ${ttsProviderLabel(selectedTtsProvider())}`, "stt");
+		const usbOk = await connectFt232h(true);
+		if (!usbOk) log("FT232H not connected; motor tools will report errors", "agent");
+		await startOrientationTracking().catch((error) =>
+			log(`Orientation tracking failed: ${error instanceof Error ? error.message : String(error)}`, "agent"),
+		);
+		try {
+			await ensureCameraStream();
+			log("Camera enabled", "agent");
+		} catch (error) {
+			log(`Camera enable failed: ${error instanceof Error ? error.message : String(error)}`, "agent");
+		}
+		await startRecognition();
+		await enterRobotMode();
+	} finally {
+		startAllButton.textContent = previousLabel;
+		startAllButton.disabled = false;
 	}
 };
 
@@ -621,9 +1105,13 @@ document.addEventListener("fullscreenchange", () => {
 	}
 });
 
-robotFace.onclick = () => {
-	if (ttsOutputActive()) interruptSpeech();
-};
+function handleRobotTouch(event: PointerEvent): void {
+	if (event.target === backButton) return;
+	event.preventDefault();
+	abortCurrentAgentTurn();
+}
+
+robotSection.addEventListener("pointerdown", handleRobotTouch);
 
 micButton.onclick = () => {
 	log("STT start requested: local Parakeet/Silero", "stt");

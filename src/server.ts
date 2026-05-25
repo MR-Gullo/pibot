@@ -6,16 +6,21 @@ import { createConnection } from "node:net";
 import { extname, join, resolve } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
-import { AgentHarness, type AgentTool, InMemorySessionRepo } from "@earendil-works/pi-agent-core";
+import { AgentHarness, type AgentMessage, type AgentTool, InMemorySessionRepo } from "@earendil-works/pi-agent-core";
 import { NodeExecutionEnv } from "@earendil-works/pi-agent-core/node";
 import {
 	type Api,
+	type AssistantMessage,
 	getModel,
 	getModels,
 	getProviders,
+	type ImageContent,
 	type KnownProvider,
 	type Model,
+	type TextContent,
+	type ToolResultMessage,
 	Type,
+	type UserMessage,
 } from "@earendil-works/pi-ai";
 import { WebSocket, WebSocketServer } from "ws";
 import { formatMemoriesForSystemPrompt, memoryTool } from "./memory.js";
@@ -35,10 +40,17 @@ const elevenLabsModelId = process.env.ELEVENLABS_MODEL_ID ?? "eleven_v3";
 const defaultTtsProvider = process.env.TTS_PROVIDER ?? "elevenlabs";
 const parakeetSttWorkerPath = resolve(__dirname, "../scripts/parakeet-stt-worker.py");
 const serverVersion = String(Date.now());
+const maxContextImages = Number(process.env.MAX_CONTEXT_IMAGES ?? 4);
 
 const motorParameters = Type.Object({
-	durationMs: Type.Optional(Type.Number({ description: "Duration in ms. Max 3000. Defaults to 500." })),
+	durationMs: Type.Number({ description: "Duration in milliseconds. Required. No default is assumed." }),
 });
+const turnDegreesParameters = Type.Object({
+	degrees: Type.Optional(
+		Type.Number({ description: "Counter-clockwise turn amount in degrees. Max 359. Defaults to 45." }),
+	),
+});
+const emptyParameters = Type.Object({});
 type ClientLogLevel = "log" | "info" | "warn" | "error" | "debug" | "app";
 type TtsProvider = "elevenlabs" | "pocket";
 
@@ -51,10 +63,12 @@ interface ClientLogMsg {
 	time: number;
 }
 
+type MotorCommand = "forward" | "turn_left" | "turn_left_degrees" | "stop";
+
 type ClientMsg =
 	| { type: "prompt"; text: string }
 	| { type: "photo_result"; id: string; dataUrl?: string; error?: string }
-	| { type: "sim_motor_result"; command: string; durationMs: number }
+	| { type: "motor_result"; id: string; ok: boolean; error?: string }
 	| { type: "speak_done"; id: string }
 	| { type: "speak_cancelled"; id: string }
 	| ClientLogMsg
@@ -93,6 +107,15 @@ const pendingPhotos = new Map<
 		timeout: NodeJS.Timeout;
 	}
 >();
+const pendingMotors = new Map<
+	string,
+	{
+		client: WebSocket;
+		resolve: () => void;
+		reject: (error: Error) => void;
+		timeout: NodeJS.Timeout;
+	}
+>();
 const clientUserAgents = new Map<WebSocket, string>();
 let robotClient: WebSocket | undefined;
 let pocketTtsProcess: ChildProcess | undefined;
@@ -120,14 +143,10 @@ process.once("SIGTERM", () => {
 	process.exit(143);
 });
 
-function readRecord(value: unknown): Record<string, unknown> {
-	return typeof value === "object" && value !== null ? (value as Record<string, unknown>) : {};
-}
-
-async function readRequestJson(req: AsyncIterable<Uint8Array>): Promise<unknown> {
+async function readRequestJson<T>(req: AsyncIterable<Uint8Array>): Promise<T> {
 	const chunks: Uint8Array[] = [];
 	for await (const chunk of req) chunks.push(chunk);
-	return JSON.parse(Buffer.concat(chunks).toString("utf8"));
+	return JSON.parse(Buffer.concat(chunks).toString("utf8")) as T;
 }
 
 function logClientMessage(msg: ClientLogMsg): void {
@@ -135,7 +154,7 @@ function logClientMessage(msg: ClientLogMsg): void {
 	console[level](`[client:${msg.level}] ${msg.message} (${msg.url}) ua=${msg.userAgent}`);
 }
 
-function broadcast(data: unknown): void {
+function broadcast(data: object): void {
 	const msg = JSON.stringify(data);
 	for (const client of clients) {
 		if (client.readyState === WebSocket.OPEN) client.send(msg);
@@ -279,6 +298,49 @@ function rejectPhoto(id: string, error: Error): void {
 	pending.reject(error);
 }
 
+function rejectMotor(id: string, error: Error): void {
+	const pending = pendingMotors.get(id);
+	if (!pending) return;
+	clearTimeout(pending.timeout);
+	pendingMotors.delete(id);
+	pending.reject(error);
+}
+
+function resolveMotor(id: string): void {
+	const pending = pendingMotors.get(id);
+	if (!pending) return;
+	clearTimeout(pending.timeout);
+	pendingMotors.delete(id);
+	pending.resolve();
+}
+
+function rejectMotorsForClient(client: WebSocket): void {
+	for (const [id, pending] of pendingMotors) {
+		if (pending.client === client) rejectMotor(id, new Error("Robot client disconnected"));
+	}
+}
+
+function rejectAllMotors(reason: string): void {
+	for (const id of pendingMotors.keys()) rejectMotor(id, new Error(reason));
+}
+
+async function executeMotorOnClient(command: MotorCommand, durationMs: number, degrees?: number): Promise<void> {
+	const client = robotClient;
+	if (!client || client.readyState !== WebSocket.OPEN) throw new Error("Robot client not connected");
+	const id = randomUUID();
+	client.send(JSON.stringify({ type: "motor_request", id, command, durationMs, degrees }));
+	await new Promise<void>((resolve, reject) => {
+		const timeout = setTimeout(() => rejectMotor(id, new Error("Motor command timed out")), durationMs + 6000);
+		pendingMotors.set(id, { client, resolve, reject, timeout });
+	});
+}
+
+function stopMotorsImmediate(): void {
+	const client = robotClient;
+	if (!client || client.readyState !== WebSocket.OPEN) return;
+	client.send(JSON.stringify({ type: "motor_request", id: randomUUID(), command: "stop", durationMs: 0 }));
+}
+
 function resolvePhoto(id: string, capture: PhotoCapture): void {
 	const pending = pendingPhotos.get(id);
 	if (!pending) return;
@@ -308,16 +370,10 @@ async function capturePhotoFromClient(): Promise<PhotoCapture> {
 	});
 }
 
-function extractAssistantText(message: unknown): string {
-	const record = readRecord(message);
-	const content = record.content;
-	if (typeof content === "string") return content;
-	if (!Array.isArray(content)) return "";
-	return content
-		.map((entry) => {
-			const item = readRecord(entry);
-			return item.type === "text" && typeof item.text === "string" ? item.text : "";
-		})
+function extractAssistantText(message: AssistantMessage): string {
+	return message.content
+		.filter((entry): entry is TextContent => entry.type === "text")
+		.map((entry) => entry.text)
 		.join("")
 		.trim();
 }
@@ -363,7 +419,80 @@ function selectModel(): Model<Api> {
 	return getModel(provider as KnownProvider, modelId as never) as Model<Api>;
 }
 
-function motorTool(name: string, description: string): AgentTool {
+type ImageBearingMessage = UserMessage | ToolResultMessage;
+type ImageBearingContent = Array<TextContent | ImageContent>;
+
+interface ImagePruneState {
+	remainingImages: number;
+	prunedImages: number;
+}
+
+interface MotorToolDetails {
+	command: string;
+	durationMs: number;
+	error?: string;
+}
+
+interface TurnDegreesDetails extends MotorToolDetails {
+	degrees: number;
+}
+
+interface PhotoToolDetails {
+	mimeType: string;
+	bytes: number;
+}
+
+function isImageBearingMessage(message: AgentMessage): message is ImageBearingMessage {
+	return message.role === "user" || message.role === "toolResult";
+}
+
+function pruneImageContent(content: ImageBearingContent, state: ImagePruneState): ImageBearingContent {
+	let changed = false;
+	const nextContent = [...content];
+	for (let partIndex = nextContent.length - 1; partIndex >= 0; partIndex--) {
+		const part = nextContent[partIndex]!;
+		if (part.type !== "image") continue;
+		if (state.remainingImages > 0) {
+			state.remainingImages--;
+			continue;
+		}
+		changed = true;
+		state.prunedImages++;
+		nextContent[partIndex] = {
+			type: "text",
+			text: "[Older robot camera image omitted from model context to keep the conversation small.]",
+		};
+	}
+	return changed ? nextContent : content;
+}
+
+function pruneImageBearingMessage(message: ImageBearingMessage, state: ImagePruneState): ImageBearingMessage {
+	if (message.role === "user") {
+		if (typeof message.content === "string") return message;
+		const content = pruneImageContent(message.content, state);
+		return content === message.content ? message : { ...message, content };
+	}
+	const content = pruneImageContent(message.content, state);
+	return content === message.content ? message : { ...message, content };
+}
+
+function pruneImagesForContext(messages: AgentMessage[], maxImages: number): AgentMessage[] {
+	const state: ImagePruneState = { remainingImages: Math.max(0, maxImages), prunedImages: 0 };
+	const nextMessages = [...messages];
+	for (let messageIndex = nextMessages.length - 1; messageIndex >= 0; messageIndex--) {
+		const message = nextMessages[messageIndex]!;
+		if (!isImageBearingMessage(message)) continue;
+		nextMessages[messageIndex] = pruneImageBearingMessage(message, state);
+	}
+	if (state.prunedImages > 0) console.log(`[context] pruned ${state.prunedImages} old image(s), kept ${maxImages}`);
+	return nextMessages;
+}
+
+function motorTool(
+	name: "move_forward" | "turn_left",
+	command: "forward" | "turn_left",
+	description: string,
+): AgentTool<typeof motorParameters, MotorToolDetails> {
 	return {
 		name,
 		label: name,
@@ -371,55 +500,83 @@ function motorTool(name: string, description: string): AgentTool {
 		executionMode: "sequential",
 		parameters: motorParameters,
 		execute: async (_id, params) => {
-			const durationMs = Math.max(0, Math.min(3000, Number(readRecord(params).durationMs ?? 500)));
+			const durationMs = Math.max(0, params.durationMs);
 			motorLog.push({ t: Date.now(), command: name, durationMs });
 			broadcast({ type: "sim_motor", command: name, durationMs });
-			await new Promise((resolveTimeout) => setTimeout(resolveTimeout, Math.min(durationMs, 300)));
-			return {
-				content: [{ type: "text", text: `Simulated ${name} for ${durationMs}ms.` }],
-				details: { command: name, durationMs },
-			};
+			try {
+				await executeMotorOnClient(command, durationMs);
+				return {
+					content: [{ type: "text", text: `Executed ${name} for ${durationMs}ms.` }],
+					details: { command: name, durationMs },
+				};
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				return {
+					content: [{ type: "text", text: `Motor ${name} failed: ${message}` }],
+					details: { command: name, durationMs, error: message },
+				};
+			}
 		},
 	};
 }
 
-const tools = [
-	motorTool("move_forward", "Drive forward for a short duration. Hardware supports forward motion only."),
-	motorTool(
-		"turn_left",
-		"Rotate counter-clockwise (left) in place for a short duration. Hardware supports rotation in this direction only.",
-	),
-	{
-		name: "stop",
-		label: "Stop",
-		description: "Emergency/safety stop. Simulated for now.",
-		executionMode: "sequential",
-		parameters: Type.Object({}),
-		execute: async () => {
-			motorLog.push({ t: Date.now(), command: "stop", durationMs: 0 });
-			broadcast({ type: "sim_motor", command: "stop", durationMs: 0 });
-			return { content: [{ type: "text", text: "Simulated stop." }], details: { command: "stop" } };
-		},
-	} satisfies AgentTool,
-	{
-		name: "take_photo",
-		label: "Take Photo",
-		description:
-			"Take a photo using the phone front-facing camera and return it to you. Use this to look at what the user shows you.",
-		parameters: Type.Object({}),
-		execute: async () => {
-			const capture = await capturePhotoFromClient();
+const moveForwardTool = motorTool(
+	"move_forward",
+	"forward",
+	"Drive forward for the requested duration in milliseconds. Hardware supports forward motion only.",
+);
+const turnLeftTool = motorTool(
+	"turn_left",
+	"turn_left",
+	"Rotate counter-clockwise (left) in place for the requested duration in milliseconds. Hardware supports rotation in this direction only.",
+);
+
+const turnLeftDegreesTool: AgentTool<typeof turnDegreesParameters, TurnDegreesDetails> = {
+	name: "turn_left_degrees",
+	label: "Turn Left Degrees",
+	description:
+		"Rotate counter-clockwise by an approximate number of degrees using the phone orientation sensor. Use this when the user asks for a specific angle.",
+	executionMode: "sequential",
+	parameters: turnDegreesParameters,
+	execute: async (_id, params) => {
+		const degrees = Math.max(1, Math.min(359, params.degrees ?? 45));
+		const durationMs = Math.max(1200, Math.min(18000, Math.round(degrees * 65)));
+		motorLog.push({ t: Date.now(), command: "turn_left_degrees", durationMs });
+		broadcast({ type: "sim_motor", command: `turn_left_degrees ${degrees}°`, durationMs });
+		try {
+			await executeMotorOnClient("turn_left_degrees", durationMs, degrees);
 			return {
-				content: [
-					{ type: "text", text: "Aktuelles Kamerabild vom Roboter." },
-					{ type: "image", data: capture.base64, mimeType: capture.mimeType },
-				],
-				details: { mimeType: capture.mimeType, bytes: capture.base64.length },
+				content: [{ type: "text", text: `Executed approximate left turn by ${degrees} degrees.` }],
+				details: { command: "turn_left_degrees", degrees, durationMs },
 			};
-		},
-	} satisfies AgentTool,
-	memoryTool,
-];
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			return {
+				content: [{ type: "text", text: `Motor turn_left_degrees failed: ${message}` }],
+				details: { command: "turn_left_degrees", degrees, durationMs, error: message },
+			};
+		}
+	},
+};
+
+const takePhotoTool: AgentTool<typeof emptyParameters, PhotoToolDetails> = {
+	name: "take_photo",
+	label: "Take Photo",
+	description: "Take a photo of your surroundings using the phone front-facing camera.",
+	parameters: emptyParameters,
+	execute: async () => {
+		const capture = await capturePhotoFromClient();
+		return {
+			content: [
+				{ type: "text", text: "Aktuelles Kamerabild vom Roboter." },
+				{ type: "image", data: capture.base64, mimeType: capture.mimeType },
+			],
+			details: { mimeType: capture.mimeType, bytes: capture.base64.length },
+		};
+	},
+};
+
+const tools: AgentTool[] = [moveForwardTool, turnLeftTool, turnLeftDegreesTool, takePhotoTool, memoryTool];
 
 const session = await new InMemorySessionRepo().create({ id: "robot-demo" });
 const harness = new AgentHarness({
@@ -433,7 +590,7 @@ const harness = new AgentHarness({
 	},
 	tools,
 	systemPrompt:
-		async () => `Du bist das Gehirn eines kleinen Roboters mit Smartphone. Antworte immer auf Deutsch. Sei verspielt, freundlich und sicher. Verwende keine Emojis. Nutze Bewegungswerkzeuge nur für kurze Dauer. Stoppe nach Bewegungssequenzen immer. Die Hardware kann nur vorwärts fahren und sich gegen den Uhrzeigersinn drehen; rückwärts und rechts gibt es nicht. Die Motorwerkzeuge sind aktuell nur simuliert, damit wir sicher debuggen können.
+		async () => `Du bist das Gehirn eines kleinen Roboters mit Smartphone. Antworte immer auf Deutsch. Sei verspielt, freundlich und sicher. Verwende keine Emojis. Nutze Bewegungswerkzeuge nur für kurze Dauer. Die Bewegungswerkzeuge stoppen automatisch nach ihrer Dauer. Die Hardware kann nur vorwärts fahren und sich gegen den Uhrzeigersinn drehen; rückwärts und rechts gibt es nicht. Für ungefähre Drehwinkel nutze turn_left_degrees.
 
 Persistente Erinnerungen:
 ${await formatMemoriesForSystemPrompt()}
@@ -443,6 +600,8 @@ Memory-Tool-Aufrufschema:
 - Neue Erinnerung speichern: memory({"action":"append","text":"Pipi ist der Name des Roboters"})
 - Erinnerung löschen: memory({"action":"remove","index":0})`,
 });
+
+harness.on("context", (event) => ({ messages: pruneImagesForContext(event.messages, maxContextImages) }));
 
 harness.subscribe(async (event) => {
 	broadcast({ type: "agent_event", event });
@@ -620,6 +779,11 @@ async function handleClientMessage(msg: ClientMsg): Promise<void> {
 		resolveSpeech(msg.id);
 		return;
 	}
+	if (msg.type === "motor_result") {
+		if (msg.ok) resolveMotor(msg.id);
+		else rejectMotor(msg.id, new Error(msg.error ?? "Motor command failed"));
+		return;
+	}
 	if (msg.type === "photo_result") {
 		if (msg.error) {
 			rejectPhoto(msg.id, new Error(msg.error));
@@ -641,6 +805,8 @@ async function handleClientMessage(msg: ClientMsg): Promise<void> {
 	if (msg.type === "abort") {
 		resolveAllSpeech();
 		rejectAllPhotos("Aborted");
+		rejectAllMotors("Aborted");
+		stopMotorsImmediate();
 		await harness.abort();
 		broadcast({ type: "sim_motor", command: "stop", durationMs: 0 });
 	}
@@ -655,7 +821,7 @@ const server = createServer(async (req, res) => {
 	}
 	if (url.pathname === "/api/client-log" && req.method === "POST") {
 		try {
-			logClientMessage(readRecord(await readRequestJson(req)) as unknown as ClientLogMsg);
+			logClientMessage(await readRequestJson<ClientLogMsg>(req));
 			res.writeHead(204).end();
 		} catch (error) {
 			console.warn(`client log parse failed: ${error instanceof Error ? error.message : String(error)}`);
@@ -740,6 +906,7 @@ wss.on("connection", (ws, req: IncomingMessage) => {
 		}
 		resolveSpeechForClient(ws);
 		rejectPhotosForClient(ws);
+		rejectMotorsForClient(ws);
 	});
 });
 
