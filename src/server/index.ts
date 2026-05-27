@@ -8,7 +8,6 @@ import { createFileMemoryStore } from "./memory-store.js";
 import { RobotClient } from "./robot-client.js";
 import { onShutdown } from "./shutdown.js";
 import { createSttService, type SttEvent } from "./stt.js";
-import { stopMotorFireAndForget } from "./tools/index.js";
 import { createTtsService, type TtsEvent } from "./tts.js";
 import { attachWebSockets as createWebSocketServer, type WebsocketEvent } from "./websocket-server.js";
 
@@ -16,6 +15,7 @@ let broadcast: (message: ServerMessage) => void = () => undefined;
 let robotState: RobotState = { phase: "inactive" };
 let speechActive = false;
 let lastSpeechEndedAt = 0;
+let stoppedUtteranceIndex: number | undefined;
 
 const logger = createLogger((entry) => {
 	console.log(formatEntry(entry, true));
@@ -25,14 +25,14 @@ const serverLogger = logger.tag("server");
 const agentLogger = logger.tag("agent");
 const sttLogger = logger.tag("stt");
 const ttsLogger = logger.tag("tts");
-const contextLogger = logger.tag("context");
 const executionEnv = new NodeExecutionEnv({ cwd: process.cwd() });
 const memoryStore = createFileMemoryStore(executionEnv, { path: serverConfig.memoryFile });
 const robot = new RobotClient();
-const tts = createTtsService({ onEvent: handleTtsEvent });
-const stt = createSttService({ workerPath: serverConfig.parakeetSttWorkerPath, onEvent: handleSttEvent });
+const tts = createTtsService({ logger, onEvent: handleTtsEvent });
+const stt = createSttService({ workerPath: serverConfig.parakeetSttWorkerPath, logger, onEvent: handleSttEvent });
 const harness = await createRobotHarness({
 	env: executionEnv,
+	logger,
 	memoryStore,
 	maxContextImages: serverConfig.maxContextImages,
 	robot,
@@ -45,6 +45,7 @@ const http = createHttpServer({
 });
 const websockets = createWebSocketServer({
 	server: http.server,
+	logger,
 	onEvent: handleWebsocketEvent,
 });
 broadcast = websockets.broadcast;
@@ -56,6 +57,35 @@ function setRobotState(state: RobotState): void {
 
 function assistantText(): string {
 	return "assistantText" in robotState ? robotState.assistantText : "";
+}
+
+function looksLikeStopCommand(text: string): boolean {
+	const normalized = text
+		.toLowerCase()
+		.normalize("NFKD")
+		.replace(/[.,!?;:()[\]{}"'`´]/g, " ")
+		.replace(/\s+/g, " ")
+		.trim();
+	if (!normalized) return false;
+	for (const phrase of [
+		"stop",
+		"stopp",
+		"halt",
+		"anhalten",
+		"abbrechen",
+		"schluss",
+		"ruhe",
+		"sei still",
+		"sei ruhig",
+		"hör auf",
+		"hoer auf",
+	]) {
+		if (normalized === phrase) return true;
+		if (normalized.startsWith(`${phrase} `)) return true;
+		if (normalized.endsWith(` ${phrase}`)) return true;
+		if (normalized.includes(` ${phrase} `)) return true;
+	}
+	return false;
 }
 
 function submitPrompt(text: string): void {
@@ -76,19 +106,14 @@ function submitPrompt(text: string): void {
 }
 
 function handleSttEvent(event: SttEvent): void {
-	if (event.type === "loading") sttLogger.log("loading Parakeet/Silero worker");
 	if (event.type === "ready") {
 		sttLogger.log(
 			`Parakeet ready sampleRate=${event.sampleRate} vadChunkMs=${event.vadChunkMs} threshold=${event.vadThreshold} minSilenceMs=${event.minSilenceMs} prerollMs=${event.prerollMs} interimIntervalMs=${event.interimIntervalMs ?? "off"}`,
 		);
 		setRobotState({ phase: "listening" });
 	}
-	if (event.type === "worker_log") sttLogger.log(event.line);
-	if (event.type === "worker_exit") {
-		sttLogger.log(`Parakeet worker exited code=${event.code ?? "none"} signal=${event.signal ?? "none"}`);
-	}
-	if (event.type === "parse_error") sttLogger.log(`failed to parse worker line: ${event.line}; ${event.message}`);
 	if (event.type === "speech_start") {
+		stoppedUtteranceIndex = undefined;
 		sttLogger.log(`speech_start #${event.index}`);
 		setRobotState({ phase: "hearing" });
 	}
@@ -103,14 +128,22 @@ function handleSttEvent(event: SttEvent): void {
 		sttLogger.log(
 			`interim #${event.index} audioMs=${event.audioMs} decodeMs=${event.decodeMs} text=${JSON.stringify(event.text)}`,
 		);
+		if (event.text && looksLikeStopCommand(event.text) && stoppedUtteranceIndex !== event.index) {
+			stoppedUtteranceIndex = event.index;
+			sttLogger.log("stop-word detected in interim");
+			void abortRobotTurn(`interim stop word: ${event.text}`);
+		}
 	}
 	if (event.type === "error") setRobotState({ phase: "error", message: event.message });
-	if (event.type === "stop_detected") {
-		sttLogger.log(`stop-word detected in ${event.source}`);
-		void abortRobotTurn(`${event.source} stop word: ${event.text}`);
-	}
 	if (event.type === "final") {
 		sttLogger.log(`final #${event.index} decodeMs=${event.decodeMs} text=${JSON.stringify(event.text)}`);
+		if (stoppedUtteranceIndex === event.index) return;
+		if (event.text && looksLikeStopCommand(event.text)) {
+			stoppedUtteranceIndex = event.index;
+			sttLogger.log("stop-word detected in final");
+			void abortRobotTurn(`final stop word: ${event.text}`);
+			return;
+		}
 		if (!event.text || speechActive || Date.now() - lastSpeechEndedAt < 1500) {
 			setRobotState({ phase: "listening" });
 			return;
@@ -129,25 +162,16 @@ function handleTtsEvent(event: TtsEvent): void {
 		lastSpeechEndedAt = Date.now();
 		ttsLogger.log(`speech resolved id=${event.id}`);
 	}
-	if (event.type === "pocket_starting") ttsLogger.log(`starting Pocket TTS: ${event.command}`);
-	if (event.type === "pocket_ready") ttsLogger.log(`Pocket TTS ready at ${event.url}`);
-	if (event.type === "pocket_log") ttsLogger.tag("pocket").log(event.line);
-	if (event.type === "pocket_error") ttsLogger.log(`Pocket TTS failed to start: ${event.message}`);
-	if (event.type === "pocket_exit") {
-		ttsLogger.log(`Pocket TTS exited code=${event.code ?? "none"} signal=${event.signal ?? "none"}`);
-	}
-	if (event.type === "elevenlabs_voice_lookup_failed")
-		ttsLogger.log(`ElevenLabs voice lookup failed: ${event.message}`);
 }
 
 async function speakAssistantText(text: string): Promise<void> {
 	setRobotState(text ? { phase: "speaking", assistantText: text } : { phase: "listening" });
-	const speech = tts.registerSpeech(text);
+	const speech = await tts.registerSpeech(text);
 	if (!speech) return;
 	try {
 		await robot.execute({ type: "speak", payload: { url: speech.url, text }, timeoutMs: null });
 	} finally {
-		tts.resolveSpeech(speech.id);
+		await tts.resolveSpeech(speech.id);
 		setRobotState({ phase: "listening" });
 	}
 }
@@ -162,9 +186,6 @@ async function handleHarnessEvent(event: RobotHarnessEvent): Promise<void> {
 		if (event.text) agentLogger.log(`LLM: ${event.text}`);
 		await speakAssistantText(event.text);
 	}
-	if (event.type === "context_pruned") {
-		contextLogger.log(`removed ${event.removedImages} old image(s), kept ${event.keptImages}`);
-	}
 	if (event.type === "session_reset") {
 		setRobotState({ phase: "inactive" });
 		agentLogger.log("session reset; context cleared");
@@ -174,9 +195,7 @@ async function handleHarnessEvent(event: RobotHarnessEvent): Promise<void> {
 async function abortRobotTurn(reason: string): Promise<void> {
 	agentLogger.log(`abort: ${reason}`);
 	void robot.execute({ type: "cancel_speech", payload: { reason }, timeoutMs: 1000 }).catch(() => undefined);
-	tts.resolveAllSpeech();
-	robot.rejectAll(reason);
-	stopMotorFireAndForget(robot);
+	await tts.resolveAllSpeech();
 	try {
 		await harness.current().abort();
 	} catch (error) {
@@ -188,14 +207,13 @@ async function abortRobotTurn(reason: string): Promise<void> {
 async function handleWebsocketEvent(event: WebsocketEvent): Promise<void> {
 	if (event.type === "client_connected") {
 		serverLogger.log("browser client connected");
-		event.client.send(JSON.stringify({ type: "hello", state: robotState }));
+		event.client.send(JSON.stringify({ type: "state", state: robotState }));
 		robot.setWebSocket(event.client);
 		logger.tag("robot").log("active robot client connected");
 	}
-	if (event.type === "client_rejected") serverLogger.log("rejected extra ws client");
 	if (event.type === "client_disconnected") {
 		serverLogger.log("browser client disconnected");
-		tts.resolveAllSpeech();
+		await tts.resolveAllSpeech();
 	}
 	if (event.type === "client_message") {
 		const msg = event.message;
@@ -208,11 +226,10 @@ async function handleWebsocketEvent(event: WebsocketEvent): Promise<void> {
 		if (msg.type === "reset_session") {
 			serverLogger.log("session reset: client request");
 			await abortRobotTurn("reset: client request");
-			await harness.reset("client request");
+			await harness.rebuildSession("client request");
 		}
 	}
 	if (event.type === "audio_frame") stt.handleAudioFrame(event.data);
-	if (event.type === "message_error") logger.tag("server").tag("error").log(event.message);
 }
 
 onShutdown(async () => {

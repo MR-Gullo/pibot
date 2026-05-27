@@ -69,10 +69,16 @@ export type RobotWireResponse<T extends RobotRpcType = RobotRpcType> = {
 	};
 }[T];
 
+export interface RobotWireCancel {
+	type: "robot_cancel";
+	id: string;
+	reason: string;
+}
+
 export type ServerMessage =
-	| { type: "hello"; state: RobotState }
 	| { type: "state"; state: RobotState }
 	| { type: "log"; entry: LogEntry }
-	| RobotWireRequest;
+	| RobotWireRequest
+	| RobotWireCancel;
 
 export type ClientMessage = ClientLogMsg | { type: "abort" } | { type: "reset_session" } | RobotWireResponse;
