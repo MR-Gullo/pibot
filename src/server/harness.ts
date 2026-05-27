@@ -64,7 +64,7 @@ function formatMemories(memories: string[]): string {
 }
 
 async function buildSystemPrompt(memoryStore: MemoryStore): Promise<string> {
-	return `Du bist das Gehirn eines kleinen Roboters mit Smartphone. Antworte immer auf Deutsch. Sei verspielt, freundlich und sicher. Verwende keine Emojis. Nutze Bewegungswerkzeuge nur für kurze Dauer. Die Bewegungswerkzeuge stoppen automatisch nach ihrer Dauer. Die Hardware kann nur vorwärts fahren und sich gegen den Uhrzeigersinn drehen; rückwärts und rechts gibt es nicht. Für ungefähre Drehwinkel nutze turn_left_degrees. Wenn du aktuelle Fakten oder Internet-Informationen brauchst, nutze web_search. Wenn du Details aus einem gefundenen Treffer brauchst, nutze fetch_page_content mit der URL.
+	return `Du bist das Gehirn eines kleinen Roboters mit Smartphone. Antworte immer auf Deutsch. Sei verspielt, freundlich und sicher. Dein Text wird direkt an eine Plaintext-Sprachausgabe gesendet: Verwende kein Markdown, keine Listen, keine Codeblöcke, keine Überschriften und keine Emojis. Schreibe Zahlen so, dass eine Sprachausgabe sie natürlich vorliest: vermeide Ziffern mit Tausender- oder Dezimaltrennzeichen wie 6.400 oder 1,23; schreibe stattdessen ausgeschriebene oder eindeutig sprechbare Formen wie sechstausendvierhundert, eins Komma zwei drei oder one point two three, passend zur Antwortsprache. Nutze Bewegungswerkzeuge nur für kurze Dauer. Die Bewegungswerkzeuge stoppen automatisch nach ihrer Dauer. Die Hardware kann nur vorwärts fahren und sich gegen den Uhrzeigersinn drehen; rückwärts und rechts gibt es nicht. Für ungefähre Drehwinkel nutze turn_left_degrees. Wenn du aktuelle Fakten oder Internet-Informationen brauchst, nutze web_search. Wenn du Details aus einem gefundenen Treffer brauchst, nutze fetch_page_content mit der URL.
 
 Persistente Erinnerungen:
 ${formatMemories(await memoryStore.list())}
@@ -85,6 +85,7 @@ function extractAssistantText(message: AssistantMessage): string {
 
 export type RobotHarnessEvent =
 	| { type: "assistant_start" }
+	| { type: "assistant_delta"; text: string }
 	| { type: "tool_start"; name: string; args: unknown }
 	| { type: "assistant_end"; text: string }
 	| { type: "session_reset"; reason: string };
@@ -142,6 +143,13 @@ export async function createRobotHarness(deps: {
 		newHarness.subscribe(async (event) => {
 			if (event.type === "message_start" && event.message.role === "assistant")
 				await emit({ type: "assistant_start" });
+			if (
+				event.type === "message_update" &&
+				event.message.role === "assistant" &&
+				event.assistantMessageEvent.type === "text_delta"
+			) {
+				await emit({ type: "assistant_delta", text: event.assistantMessageEvent.delta });
+			}
 			if (event.type === "tool_execution_start") {
 				await emit({ type: "tool_start", name: event.toolName, args: event.args });
 			}

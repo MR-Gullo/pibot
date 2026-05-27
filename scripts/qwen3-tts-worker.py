@@ -2,17 +2,20 @@
 from __future__ import annotations
 
 import argparse
-import base64
 import json
 import math
 import platform
+import queue
 import re
+import struct
 import sys
 import tempfile
+import threading
 import time
 import unicodedata
 from pathlib import Path
 from collections.abc import Callable, Iterator
+from contextlib import redirect_stdout
 from typing import Any, Iterable
 
 import numpy as np
@@ -33,10 +36,57 @@ VALID_MLX_QUANTIZATION_SUFFIXES = ("bf16", "4bit", "6bit", "8bit")
 DEFAULT_MODEL = "Qwen/Qwen3-TTS-12Hz-1.7B-Base"
 DEFAULT_REF_TEXT = "I'm confused why some people have super short timelines, yet at the same time are bullish on scaling up reinforcement learning atop LLMs. If we're actually close to a human-like learner, then this whole approach of training on verifiable outcomes."
 NORMALIZED_REF_AUDIO_CACHE: dict[str, str] = {}
+BINARY_MODE = False
+
+WORKER_INPUT_SPEAK = 1
+WORKER_INPUT_CANCEL = 2
+WORKER_INPUT_SHUTDOWN = 3
+WORKER_OUTPUT_READY = 1
+WORKER_OUTPUT_AUDIO_START = 2
+WORKER_OUTPUT_AUDIO_CHUNK = 3
+WORKER_OUTPUT_AUDIO_DONE = 4
+WORKER_OUTPUT_ERROR = 5
+FRAME_HEADER = struct.Struct("<BII")
+STDOUT_BUFFER = sys.stdout.buffer
+
+
+class RequestCancelled(Exception):
+    pass
 
 
 def log_json(message: dict[str, Any]) -> None:
-    print(json.dumps(message, ensure_ascii=False), flush=True)
+    line = json.dumps(message, ensure_ascii=False)
+    if BINARY_MODE:
+        print(line, file=sys.stderr, flush=True)
+    else:
+        print(line, flush=True)
+
+
+def read_exact(stream: Any, length: int) -> bytes | None:
+    chunks = bytearray()
+    while len(chunks) < length:
+        chunk = stream.read(length - len(chunks))
+        if not chunk:
+            return None
+        chunks.extend(chunk)
+    return bytes(chunks)
+
+
+def read_binary_frame(stream: Any) -> tuple[int, int, bytes] | None:
+    header = read_exact(stream, FRAME_HEADER.size)
+    if header is None:
+        return None
+    frame_type, request_id, payload_len = FRAME_HEADER.unpack(header)
+    payload = read_exact(stream, payload_len)
+    if payload is None:
+        return None
+    return frame_type, request_id, payload
+
+
+def write_binary_frame(frame_type: int, request_id: int, payload: bytes = b"") -> None:
+    STDOUT_BUFFER.write(FRAME_HEADER.pack(frame_type, request_id & 0xFFFFFFFF, len(payload)))
+    STDOUT_BUFFER.write(payload)
+    STDOUT_BUFFER.flush()
 
 
 def normalize_mlx_quantization(value: str | None) -> str | None:
@@ -452,43 +502,80 @@ def generate_once(args: argparse.Namespace) -> None:
 
 
 def serve(args: argparse.Namespace) -> None:
-    backend, model, model_name = load_backend(args)
-    log_json({"type": "server_ready", "backend": backend, "model": model_name})
-    output_dir = Path(args.output_dir).expanduser().resolve()
-    output_dir.mkdir(parents=True, exist_ok=True)
+    global BINARY_MODE
+    BINARY_MODE = True
+    with redirect_stdout(sys.stderr):
+        backend, model, model_name = load_backend(args)
+    incoming: queue.Queue[tuple[int, int, bytes]] = queue.Queue()
+    cancelled: set[int] = set()
+    cancelled_lock = threading.Lock()
+    shutdown = threading.Event()
 
-    for raw_line in sys.stdin:
-        line = raw_line.strip()
-        if not line:
+    def reader() -> None:
+        while not shutdown.is_set():
+            frame = read_binary_frame(sys.stdin.buffer)
+            if frame is None:
+                shutdown.set()
+                incoming.put((WORKER_INPUT_SHUTDOWN, 0, b""))
+                return
+            frame_type, request_id, payload = frame
+            if frame_type == WORKER_INPUT_CANCEL:
+                with cancelled_lock:
+                    cancelled.add(request_id)
+                continue
+            incoming.put((frame_type, request_id, payload))
+
+    def is_cancelled(request_id: int) -> bool:
+        with cancelled_lock:
+            return request_id in cancelled
+
+    def clear_cancelled(request_id: int) -> None:
+        with cancelled_lock:
+            cancelled.discard(request_id)
+
+    threading.Thread(target=reader, daemon=True).start()
+    write_binary_frame(WORKER_OUTPUT_READY, 0)
+    log_json({"type": "server_ready", "backend": backend, "model": model_name})
+
+    while not shutdown.is_set():
+        frame_type, request_id, payload = incoming.get()
+        if frame_type == WORKER_INPUT_SHUTDOWN:
+            shutdown.set()
+            break
+        if frame_type != WORKER_INPUT_SPEAK:
+            write_binary_frame(WORKER_OUTPUT_ERROR, request_id, f"unknown frame type {frame_type}".encode("utf8"))
             continue
         try:
-            request = json.loads(line)
-            request_id = str(request["id"])
-            text = str(request["text"]).strip()
+            if is_cancelled(request_id):
+                clear_cancelled(request_id)
+                write_binary_frame(WORKER_OUTPUT_AUDIO_DONE, request_id)
+                continue
+            text = payload.decode("utf8").strip()
             if not text:
                 raise ValueError("empty text")
             request_args = argparse.Namespace(**vars(args))
-            for key in ("language", "ref_audio", "ref_text", "ref_text_file", "seed", "temperature", "top_k", "top_p"):
-                if key in request and request[key] is not None:
-                    setattr(request_args, key, request[key])
-            def on_chunk(chunk: np.ndarray) -> None:
-                log_json(
-                    {
-                        "type": "audio_chunk",
-                        "id": request_id,
-                        "data": base64.b64encode(chunk.tobytes()).decode("ascii"),
-                    }
-                )
+            write_binary_frame(WORKER_OUTPUT_AUDIO_START, request_id, struct.pack("<I", request_args.output_sample_rate))
 
-            synthesize_chunks(request_args, backend, model, model_name, text, on_chunk)
-            log_json({"type": "request_done", "id": request_id, "contentType": "audio/wav"})
+            def on_chunk(chunk: np.ndarray) -> None:
+                if is_cancelled(request_id):
+                    raise RequestCancelled()
+                write_binary_frame(WORKER_OUTPUT_AUDIO_CHUNK, request_id, chunk.tobytes())
+
+            try:
+                with redirect_stdout(sys.stderr):
+                    synthesize_chunks(request_args, backend, model, model_name, text, on_chunk)
+            except RequestCancelled:
+                log_json({"type": "request_cancelled", "id": request_id})
+            write_binary_frame(WORKER_OUTPUT_AUDIO_DONE, request_id)
+            clear_cancelled(request_id)
         except Exception as exc:
-            log_json({"type": "request_error", "id": request.get("id") if isinstance(request, dict) else None, "message": str(exc)})
+            write_binary_frame(WORKER_OUTPUT_ERROR, request_id, str(exc).encode("utf8"))
+            clear_cancelled(request_id)
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Standalone Qwen3-TTS worker. Writes 16/24 kHz mono PCM WAV output.")
-    parser.add_argument("--serve", action="store_true", help="Run as a persistent JSON-lines worker on stdin/stdout")
+    parser.add_argument("--serve", action="store_true", help="Run as a persistent binary-framed worker on stdin/stdout")
     parser.add_argument("--text", help="Target text to synthesize")
     parser.add_argument("--text-file", help="File containing target text to synthesize")
     parser.add_argument("--output", default="data/voices/qwen3-test.wav", help="Output WAV path")

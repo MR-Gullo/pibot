@@ -1,7 +1,6 @@
 import type { RobotRpcMap } from "../../types.js";
 import type { ClientLogger } from "../logger.js";
 
-export type TtsProvider = "elevenlabs" | "qwen3";
 export type ConversationPhase = "inactive" | "listening" | "thinking" | "speaking";
 
 interface ActiveSpeech {
@@ -12,11 +11,19 @@ interface ActiveSpeech {
 	finished: boolean;
 }
 
+interface ActivePcmStream {
+	generation: number;
+	sampleRate: number;
+	nextPlayTime: number;
+	pendingSources: number;
+	doneRequested: boolean;
+	finishResolve: (() => void) | undefined;
+	nodes: AudioNode[];
+	cleanup: () => void;
+}
+
 export interface SpeechTool {
 	enableTts: () => void;
-	selectedTtsProvider: () => TtsProvider;
-	ttsProviderLabel: (provider: TtsProvider) => string;
-	handleProviderChange: () => void;
 	cancelSpeech: (reason: string) => void;
 	handleSpeak: (
 		payload: RobotRpcMap["speak"]["request"],
@@ -26,11 +33,14 @@ export interface SpeechTool {
 		payload: RobotRpcMap["cancel_speech"]["request"],
 		signal: AbortSignal,
 	) => RobotRpcMap["cancel_speech"]["response"];
+	startPcmStream: (sampleRate: number) => void;
+	pushPcmAudio: (pcm: Uint8Array) => void;
+	finishPcmStream: () => Promise<void>;
+	failPcmStream: (message: string) => void;
 }
 
 export function createSpeechTool(deps: {
 	logger: ClientLogger;
-	ttsProviderControl: HTMLSelectElement;
 	face: HTMLElement;
 	setPhase: (phase: ConversationPhase) => void;
 	resetToListeningOrIdle: () => void;
@@ -40,15 +50,13 @@ export function createSpeechTool(deps: {
 }): SpeechTool {
 	const logger = deps.logger.tag("stt");
 	const ttsEnabledKey = "robot-tts-enabled";
-	const ttsProviderKey = "robot-tts-provider";
 	let ttsEnabled = localStorage.getItem(ttsEnabledKey) === "true";
 	let currentTtsAudio: HTMLAudioElement | undefined;
 	let robotVoiceEffectCleanup: (() => void) | undefined;
 	let audioContext: AudioContext | undefined;
 	let ttsGeneration = 0;
 	let activeSpeech: ActiveSpeech | undefined;
-	deps.ttsProviderControl.value = localStorage.getItem(ttsProviderKey) === "qwen3" ? "qwen3" : "elevenlabs";
-
+	let activePcmStream: ActivePcmStream | undefined;
 	function startFaceAmpLoop(analyser: AnalyserNode): () => void {
 		const data = new Uint8Array(analyser.fftSize);
 		let smoothed = 0;
@@ -181,9 +189,29 @@ export function createSpeechTool(deps: {
 		}
 	}
 
+	function clearActivePcmStream(resolveFinished: boolean): void {
+		const stream = activePcmStream;
+		activePcmStream = undefined;
+		if (!stream) return;
+		stream.cleanup();
+		for (const node of stream.nodes) node.disconnect();
+		if (resolveFinished) stream.finishResolve?.();
+	}
+
+	function maybeFinishPcmStream(stream: ActivePcmStream): void {
+		if (activePcmStream !== stream || !stream.doneRequested || stream.pendingSources > 0) return;
+		clearActivePcmStream(true);
+		deps.onSpeakingChange(false);
+		deps.setMicInputBlockedUntil(Date.now() + 500);
+		deps.resetToListeningOrIdle();
+		deps.resetRecognitionAfterTts();
+		logger.log("Qwen3 PCM stream finished, resetting STT");
+	}
+
 	function interruptTtsOnly(): void {
 		ttsGeneration++;
 		clearCurrentTtsAudio();
+		clearActivePcmStream(true);
 		if ("speechSynthesis" in window) window.speechSynthesis.cancel();
 	}
 
@@ -220,14 +248,6 @@ export function createSpeechTool(deps: {
 		logger.log(message);
 	}
 
-	function selectedTtsProvider(): TtsProvider {
-		return deps.ttsProviderControl.value === "qwen3" ? "qwen3" : "elevenlabs";
-	}
-
-	function ttsProviderLabel(provider: TtsProvider): string {
-		return provider === "qwen3" ? "Qwen3 local clone" : "ElevenLabs pibot";
-	}
-
 	function startSpeech(url: string, text: string, generation: number): void {
 		const trimmed = text.trim();
 		if (!trimmed) {
@@ -235,14 +255,13 @@ export function createSpeechTool(deps: {
 			return;
 		}
 
-		const provider = selectedTtsProvider();
-		const providerLabel = ttsProviderLabel(provider);
+		const providerLabel = "Qwen3 local clone";
 		clearCurrentTtsAudio();
 		deps.onSpeakingChange(true);
 		deps.setPhase("speaking");
 		deps.setMicInputBlockedUntil(0);
 
-		const audio = new Audio(`${url}&provider=${encodeURIComponent(provider)}`);
+		const audio = new Audio(url);
 		currentTtsAudio = audio;
 		createRobotVoiceEffect(audio);
 		audio.onplay = () => logger.log(`${providerLabel} playing streamed response ${trimmed.length} chars`);
@@ -289,18 +308,106 @@ export function createSpeechTool(deps: {
 		return { ok: true };
 	}
 
-	function handleProviderChange(): void {
-		localStorage.setItem(ttsProviderKey, selectedTtsProvider());
-		logger.log(`TTS provider selected: ${ttsProviderLabel(selectedTtsProvider())}`);
+	function startPcmStream(sampleRate: number): void {
+		interruptTtsOnly();
+		if (!audioContext) audioContext = new AudioContext();
+		const context = audioContext;
+		void context.resume();
+		const highpass = context.createBiquadFilter();
+		highpass.type = "highpass";
+		highpass.frequency.value = 150;
+		const lowpass = context.createBiquadFilter();
+		lowpass.type = "lowpass";
+		lowpass.frequency.value = 7200;
+		const presence = context.createBiquadFilter();
+		presence.type = "peaking";
+		presence.frequency.value = 2600;
+		presence.Q.value = 0.9;
+		presence.gain.value = 3.5;
+		const compressor = context.createDynamicsCompressor();
+		compressor.threshold.value = -24;
+		compressor.knee.value = 18;
+		compressor.ratio.value = 3;
+		compressor.attack.value = 0.006;
+		compressor.release.value = 0.12;
+		const output = context.createGain();
+		output.gain.value = 0.98;
+		const analyser = context.createAnalyser();
+		analyser.fftSize = 512;
+		analyser.smoothingTimeConstant = 0.55;
+		highpass.connect(lowpass);
+		lowpass.connect(presence);
+		presence.connect(compressor);
+		compressor.connect(output);
+		output.connect(context.destination);
+		output.connect(analyser);
+		activePcmStream = {
+			generation: ++ttsGeneration,
+			sampleRate,
+			nextPlayTime: context.currentTime + 0.05,
+			pendingSources: 0,
+			doneRequested: false,
+			finishResolve: undefined,
+			nodes: [highpass, lowpass, presence, compressor, output, analyser],
+			cleanup: startFaceAmpLoop(analyser),
+		};
+		deps.onSpeakingChange(true);
+		deps.setPhase("speaking");
+		deps.setMicInputBlockedUntil(0);
+		logger.log(`Qwen3 PCM stream started sampleRate=${sampleRate}`);
+	}
+
+	function pushPcmAudio(pcm: Uint8Array): void {
+		const stream = activePcmStream;
+		if (!stream || !audioContext || pcm.byteLength < 2) return;
+		const view = new DataView(pcm.buffer, pcm.byteOffset, pcm.byteLength);
+		const sampleCount = Math.floor(pcm.byteLength / 2);
+		const audioBuffer = audioContext.createBuffer(1, sampleCount, stream.sampleRate);
+		const channel = audioBuffer.getChannelData(0);
+		for (let index = 0; index < sampleCount; index++) channel[index] = view.getInt16(index * 2, true) / 32768;
+		const source = audioContext.createBufferSource();
+		source.buffer = audioBuffer;
+		source.connect(stream.nodes[0] ?? audioContext.destination);
+		stream.pendingSources++;
+		source.onended = () => {
+			source.disconnect();
+			stream.pendingSources--;
+			maybeFinishPcmStream(stream);
+		};
+		const startAt = Math.max(stream.nextPlayTime, audioContext.currentTime + 0.01);
+		source.start(startAt);
+		stream.nextPlayTime = startAt + audioBuffer.duration;
+	}
+
+	async function finishPcmStream(): Promise<void> {
+		const stream = activePcmStream;
+		if (!stream) return;
+		stream.doneRequested = true;
+		if (stream.pendingSources === 0) {
+			maybeFinishPcmStream(stream);
+			return;
+		}
+		await new Promise<void>((resolve) => {
+			stream.finishResolve = resolve;
+		});
+	}
+
+	function failPcmStream(message: string): void {
+		clearActivePcmStream(true);
+		deps.onSpeakingChange(false);
+		deps.setMicInputBlockedUntil(Date.now() + 500);
+		deps.resetToListeningOrIdle();
+		logger.log(`Qwen3 PCM stream failed: ${message}`);
 	}
 
 	return {
 		enableTts,
-		selectedTtsProvider,
-		ttsProviderLabel,
-		handleProviderChange,
 		cancelSpeech,
 		handleSpeak,
 		handleCancelSpeech,
+		startPcmStream,
+		pushPcmAudio,
+		finishPcmStream,
+		failPcmStream,
 	};
 }

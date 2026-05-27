@@ -133,7 +133,6 @@ function setMicInputBlockedUntil(time: number): void {
 
 const tools = createRobotTools({
 	logger: clientLogger,
-	ttsProviderControl: setupPanelElement.ttsProviderControl,
 	face: robotFace,
 	setPhase,
 	resetToListeningOrIdle,
@@ -146,6 +145,12 @@ robotServer = new RobotServer({
 	url: `${wsProtocol}://${location.host}`,
 	logger: clientLogger,
 	tools: tools.handlers,
+	tts: {
+		startPcmStream: tools.speech.startPcmStream,
+		pushPcmAudio: tools.speech.pushPcmAudio,
+		finishPcmStream: tools.speech.finishPcmStream,
+		failPcmStream: tools.speech.failPcmStream,
+	},
 	events: {
 		onState: (state) => {
 			serverRobotState = state;
@@ -298,7 +303,7 @@ async function startRobot(): Promise<void> {
 	setupPanelElement.mode = "starting";
 	try {
 		tools.speech.enableTts();
-		log(`TTS enabled: ${tools.speech.ttsProviderLabel(tools.speech.selectedTtsProvider())}`, "stt");
+		log("TTS enabled: Qwen3 local clone", "stt");
 		const usbOk = await tools.motor.connectFt232h(true);
 		if (!usbOk) log("FT232H not connected; motor tools will report errors", "hardware");
 		await tools.motor
@@ -357,5 +362,3 @@ setupPanelElement.addEventListener("reset-session", () => {
 	send({ type: "reset_session" });
 	log("session reset requested", "ui");
 });
-
-setupPanelElement.addEventListener("tts-provider-change", () => tools.speech.handleProviderChange());

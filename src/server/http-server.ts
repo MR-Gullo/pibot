@@ -13,26 +13,6 @@ function contentTypeFor(file: string): string {
 	return "text/html; charset=utf-8";
 }
 
-function errorStatus(error: unknown): number {
-	if (typeof error !== "object" || error === null || !("status" in error)) return 500;
-	const status = (error as { status?: unknown }).status;
-	return typeof status === "number" ? status : 500;
-}
-
-async function writeAudioResponse(response: Response, contentType: string, res: ServerResponse): Promise<void> {
-	if (!response.ok || !response.body) {
-		res.writeHead(response.status || 502, { "content-type": "application/json" });
-		res.end(JSON.stringify({ error: await response.text() }));
-		return;
-	}
-	res.writeHead(200, {
-		"content-type": response.headers.get("content-type") ?? contentType,
-		"cache-control": "no-store",
-	});
-	for await (const chunk of response.body as AsyncIterable<Uint8Array>) res.write(chunk);
-	res.end();
-}
-
 async function serveStaticFile(
 	req: IncomingMessage,
 	res: ServerResponse,
@@ -72,32 +52,12 @@ async function serveStaticFile(
 	}
 }
 
-export function createHttpServer(deps: {
-	publicDir: string;
-	version: string;
-	fetchTtsAudio: (
-		id: string,
-		providerValue: string | undefined,
-	) => Promise<{ response: Response; contentType: string }>;
-}): HttpServer {
+export function createHttpServer(deps: { publicDir: string; version: string }): HttpServer {
 	const server = createServer(async (req, res) => {
 		const url = new URL(req.url ?? "/", `http://${req.headers.host}`);
 		if (url.pathname === "/__version" && req.method === "GET") {
 			res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
 			res.end(JSON.stringify({ version: deps.version }));
-			return;
-		}
-		if (url.pathname === "/api/tts" && req.method === "GET") {
-			try {
-				const audio = await deps.fetchTtsAudio(
-					url.searchParams.get("id") ?? "",
-					url.searchParams.get("provider") ?? undefined,
-				);
-				await writeAudioResponse(audio.response, audio.contentType, res);
-			} catch (error) {
-				res.writeHead(errorStatus(error), { "content-type": "application/json" });
-				res.end(JSON.stringify({ error: error instanceof Error ? error.message : String(error) }));
-			}
 			return;
 		}
 		await serveStaticFile(req, res, deps.publicDir, deps.version);

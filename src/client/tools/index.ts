@@ -25,7 +25,6 @@ export interface RobotTools {
 
 export function createRobotTools(deps: {
 	logger: ClientLogger;
-	ttsProviderControl: HTMLSelectElement;
 	face: HTMLElement;
 	setPhase: (phase: ConversationPhase) => void;
 	resetToListeningOrIdle: () => void;
@@ -37,7 +36,6 @@ export function createRobotTools(deps: {
 	const motor = createMotorTool({ logger: deps.logger });
 	const speech = createSpeechTool({
 		logger: deps.logger,
-		ttsProviderControl: deps.ttsProviderControl,
 		face: deps.face,
 		setPhase: deps.setPhase,
 		resetToListeningOrIdle: deps.resetToListeningOrIdle,

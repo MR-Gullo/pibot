@@ -4,6 +4,11 @@ import type { ClientMessage, RobotRpcMap, RobotRpcType, RobotWireCancel, RobotWi
 
 type RobotRpcResponse = RobotRpcMap[RobotRpcType]["response"];
 
+const ttsFrameStart = 1;
+const ttsFrameAudio = 2;
+const ttsFrameDone = 3;
+const ttsFrameError = 4;
+
 interface PendingRobotRequest {
 	requestType: RobotRpcType;
 	resolve: (value: RobotRpcResponse) => void;
@@ -92,9 +97,43 @@ export class RobotClient {
 		for (const id of this.pending.keys()) this.rejectPending(id, new Error(reason));
 	}
 
+	sendTtsStart(sampleRate: number): boolean {
+		const payload = Buffer.allocUnsafe(4);
+		payload.writeUInt32LE(sampleRate, 0);
+		return this.sendBinaryFrame(ttsFrameStart, payload);
+	}
+
+	sendTtsAudio(pcm: Uint8Array): boolean {
+		return this.sendBinaryFrame(ttsFrameAudio, pcm);
+	}
+
+	sendTtsDone(): boolean {
+		return this.sendBinaryFrame(ttsFrameDone);
+	}
+
+	sendTtsError(message: string): boolean {
+		return this.sendBinaryFrame(ttsFrameError, Buffer.from(message, "utf8"));
+	}
+
 	stop(): void {
 		clearInterval(this.heartbeat);
 		this.rejectAll("Robot client stopped");
+	}
+
+	private sendBinaryFrame(kind: number, payload?: Uint8Array): boolean {
+		const client = this.current;
+		if (!client || client.readyState !== WebSocket.OPEN) return false;
+		const payloadLength = payload?.byteLength ?? 0;
+		const frame = Buffer.allocUnsafe(1 + payloadLength);
+		frame.writeUInt8(kind, 0);
+		if (payload) Buffer.from(payload.buffer, payload.byteOffset, payload.byteLength).copy(frame, 1);
+		try {
+			client.send(frame);
+			return true;
+		} catch {
+			this.clearWebSocket(client);
+			return false;
+		}
 	}
 
 	private cancelRemote(requestId: string, reason: string): void {

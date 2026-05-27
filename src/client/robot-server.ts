@@ -16,6 +16,18 @@ interface ActiveRobotRequest {
 	controller: AbortController;
 }
 
+export interface RobotServerTtsHandlers {
+	startPcmStream: (sampleRate: number) => void;
+	pushPcmAudio: (pcm: Uint8Array) => void;
+	finishPcmStream: () => Promise<void>;
+	failPcmStream: (message: string) => void;
+}
+
+const ttsFrameStart = 1;
+const ttsFrameAudio = 2;
+const ttsFrameDone = 3;
+const ttsFrameError = 4;
+
 export interface RobotServerEvents {
 	onState: (state: RobotState) => void;
 	onLog: (entry: LogEntry) => void;
@@ -26,14 +38,23 @@ export class RobotServer {
 	private readonly ws: WebSocket;
 	private readonly logger: ClientLogger;
 	private readonly tools: RobotToolHandlers;
+	private readonly tts: RobotServerTtsHandlers;
 	private readonly events: RobotServerEvents;
 	private readonly activeRobotRequests = new Map<string, ActiveRobotRequest>();
 
-	constructor(deps: { url: string; logger: ClientLogger; tools: RobotToolHandlers; events: RobotServerEvents }) {
+	constructor(deps: {
+		url: string;
+		logger: ClientLogger;
+		tools: RobotToolHandlers;
+		tts: RobotServerTtsHandlers;
+		events: RobotServerEvents;
+	}) {
 		this.logger = deps.logger;
 		this.tools = deps.tools;
+		this.tts = deps.tts;
 		this.events = deps.events;
 		this.ws = new WebSocket(deps.url);
+		this.ws.binaryType = "arraybuffer";
 		this.ws.onopen = () => this.logger.tag("network").log("connected to robot server");
 		this.ws.onclose = (event) => this.handleClose(event);
 		this.ws.onerror = () => this.logger.tag("network").log("robot server connection error");
@@ -65,6 +86,14 @@ export class RobotServer {
 	}
 
 	private handleMessage(event: MessageEvent): void {
+		if (event.data instanceof ArrayBuffer) {
+			this.handleBinaryMessage(new Uint8Array(event.data));
+			return;
+		}
+		if (event.data instanceof Blob) {
+			void event.data.arrayBuffer().then((buffer) => this.handleBinaryMessage(new Uint8Array(buffer)));
+			return;
+		}
 		const message = JSON.parse(String(event.data)) as ServerMessage;
 
 		if (message.type === "robot_request") {
@@ -80,6 +109,41 @@ export class RobotServer {
 			return;
 		}
 		if (message.type === "log") this.events.onLog(message.entry);
+	}
+
+	private handleBinaryMessage(bytes: Uint8Array): void {
+		const kind = bytes[0];
+		const payload = bytes.subarray(1);
+		if (kind === ttsFrameStart) {
+			if (payload.byteLength < 4) {
+				this.send({ type: "tts_playback_error", message: "TTS start frame missing sample rate" });
+				return;
+			}
+			const sampleRate = new DataView(payload.buffer, payload.byteOffset, payload.byteLength).getUint32(0, true);
+			this.tts.startPcmStream(sampleRate);
+			return;
+		}
+		if (kind === ttsFrameAudio) {
+			this.tts.pushPcmAudio(payload);
+			return;
+		}
+		if (kind === ttsFrameDone) {
+			void this.tts
+				.finishPcmStream()
+				.then(() => this.send({ type: "tts_playback_done" }))
+				.catch((error: unknown) =>
+					this.send({
+						type: "tts_playback_error",
+						message: error instanceof Error ? error.message : String(error),
+					}),
+				);
+			return;
+		}
+		if (kind === ttsFrameError) {
+			const message = new TextDecoder().decode(payload);
+			this.tts.failPcmStream(message);
+			this.send({ type: "tts_playback_error", message });
+		}
 	}
 
 	private async handleRequest(message: RobotWireRequest): Promise<void> {

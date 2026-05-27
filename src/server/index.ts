@@ -7,9 +7,10 @@ import { createLlamaService, defaultLlamaMmprojFile, defaultLlamaModelFile } fro
 import { createLogger, formatEntry } from "./logger.js";
 import { createFileMemoryStore } from "./memory-store.js";
 import { RobotClient } from "./robot-client.js";
+import { createSentenceChunker, type SentenceChunker } from "./sentence-chunker.js";
 import { onShutdown } from "./shutdown.js";
 import { createSttService, type SttEvent } from "./stt.js";
-import { createTtsService, type TtsEvent } from "./tts.js";
+import { createTtsService } from "./tts.js";
 import { attachWebSockets as createWebSocketServer, type WebsocketEvent } from "./websocket-server.js";
 
 let broadcast: (message: ServerMessage) => void = () => undefined;
@@ -17,6 +18,9 @@ let robotState: RobotState = { phase: "inactive" };
 let speechActive = false;
 let lastSpeechEndedAt = 0;
 let stoppedUtteranceIndex: number | undefined;
+let activeChunker: SentenceChunker | undefined;
+let activeAssistantText = "";
+let ttsStartedForTurn = false;
 
 const logger = createLogger((entry) => {
 	console.log(formatEntry(entry, true));
@@ -40,7 +44,7 @@ const llama = await createLlamaService({
 	contextWindow: serverConfig.llamaContextWindow,
 	logger,
 });
-const tts = createTtsService({ qwen3WorkerPath: serverConfig.qwen3TtsWorkerPath, logger, onEvent: handleTtsEvent });
+const tts = createTtsService({ qwen3WorkerPath: serverConfig.qwen3TtsWorkerPath, logger });
 const stt = createSttService({
 	workerBinaryPath: serverConfig.sttWorkerBinaryPath,
 	modelDir: serverConfig.parakeetTdtModelDir,
@@ -58,7 +62,6 @@ const harness = await createRobotHarness({
 const http = createHttpServer({
 	publicDir: serverConfig.publicDir,
 	version: serverConfig.version,
-	fetchTtsAudio: tts.fetchTtsAudio,
 });
 const websockets = createWebSocketServer({
 	server: http.server,
@@ -175,39 +178,75 @@ function handleSttEvent(event: SttEvent): void {
 	}
 }
 
-function handleTtsEvent(event: TtsEvent): void {
-	if (event.type === "speech_registered") {
-		speechActive = true;
-		ttsLogger.log(`registered speech id=${event.id} chars=${event.chars}`);
-	}
-	if (event.type === "speech_resolved") {
-		speechActive = false;
-		lastSpeechEndedAt = Date.now();
-		ttsLogger.log(`speech resolved id=${event.id}`);
-	}
+function startAssistantSpeechStream(): void {
+	speechActive = true;
+	ttsStartedForTurn = true;
+	setRobotState({ phase: "speaking", assistantText: activeAssistantText });
+	tts.start({
+		onStart: (sampleRate) => {
+			ttsLogger.log(`PCM stream start sampleRate=${sampleRate}`);
+			if (!robot.sendTtsStart(sampleRate)) ttsLogger.log("no browser client for TTS start");
+		},
+		onAudio: (pcm) => {
+			if (!robot.sendTtsAudio(pcm)) ttsLogger.log("no browser client for TTS audio");
+		},
+		onDone: () => {
+			ttsLogger.log("PCM synthesis done");
+			if (!robot.sendTtsDone()) finishSpeechPlayback("no browser client");
+		},
+		onError: (message) => {
+			ttsLogger.log(`PCM synthesis error: ${message}`);
+			robot.sendTtsError(message);
+			finishSpeechPlayback(`TTS error: ${message}`);
+		},
+	});
 }
 
-async function speakAssistantText(text: string): Promise<void> {
-	setRobotState(text ? { phase: "speaking", assistantText: text } : { phase: "listening" });
-	const speech = await tts.registerSpeech(text);
-	if (!speech) return;
-	try {
-		await robot.execute({ type: "speak", payload: { url: speech.url, text }, timeoutMs: null });
-	} finally {
-		await tts.resolveSpeech(speech.id);
-		setRobotState({ phase: "listening" });
+function finishSpeechPlayback(reason: string): void {
+	if (!speechActive && !ttsStartedForTurn) return;
+	speechActive = false;
+	ttsStartedForTurn = false;
+	activeChunker = undefined;
+	lastSpeechEndedAt = Date.now();
+	ttsLogger.log(`speech finished: ${reason}`);
+	setRobotState({ phase: "listening" });
+}
+
+function handleAssistantTextDelta(text: string): void {
+	activeAssistantText += text;
+	setRobotState({ phase: ttsStartedForTurn ? "speaking" : "thinking", assistantText: activeAssistantText });
+	const chunker = activeChunker;
+	if (!chunker) return;
+	for (const chunk of chunker.push(text)) {
+		if (!ttsStartedForTurn) startAssistantSpeechStream();
+		ttsLogger.log(`queue text chunk chars=${chunk.length}`);
+		tts.pushText(chunk);
 	}
 }
 
 async function handleHarnessEvent(event: RobotHarnessEvent): Promise<void> {
-	if (event.type === "assistant_start") setRobotState({ phase: "thinking", assistantText: "" });
+	if (event.type === "assistant_start") {
+		activeAssistantText = "";
+		activeChunker = createSentenceChunker({ sentencesPerChunk: 3, firstChunkSentences: 1 });
+		ttsStartedForTurn = false;
+		setRobotState({ phase: "thinking", assistantText: "" });
+	}
+	if (event.type === "assistant_delta") handleAssistantTextDelta(event.text);
 	if (event.type === "tool_start") {
 		setRobotState({ phase: "tool", name: event.name, args: event.args, assistantText: assistantText() });
 		agentLogger.log(`tool ${event.name} ${JSON.stringify(event.args)}`);
 	}
 	if (event.type === "assistant_end") {
 		if (event.text) agentLogger.log(`LLM: ${event.text}`);
-		await speakAssistantText(event.text);
+		if (!activeAssistantText && event.text) handleAssistantTextDelta(event.text);
+		const tail = activeChunker?.flush();
+		if (tail) {
+			if (!ttsStartedForTurn) startAssistantSpeechStream();
+			ttsLogger.log(`queue final text chunk chars=${tail.length}`);
+			tts.pushText(tail);
+		}
+		if (ttsStartedForTurn) tts.end();
+		else setRobotState({ phase: "listening" });
 	}
 	if (event.type === "session_reset") {
 		setRobotState({ phase: "inactive" });
@@ -218,7 +257,9 @@ async function handleHarnessEvent(event: RobotHarnessEvent): Promise<void> {
 async function abortRobotTurn(reason: string): Promise<void> {
 	agentLogger.log(`abort: ${reason}`);
 	void robot.execute({ type: "cancel_speech", payload: { reason }, timeoutMs: 1000 }).catch(() => undefined);
-	await tts.resolveAllSpeech();
+	tts.cancel(reason);
+	robot.sendTtsDone();
+	finishSpeechPlayback(`aborted: ${reason}`);
 	try {
 		await harness.current().abort();
 	} catch (error) {
@@ -237,7 +278,8 @@ async function handleWebsocketEvent(event: WebsocketEvent): Promise<void> {
 	}
 	if (event.type === "client_disconnected") {
 		serverLogger.log("browser client disconnected");
-		await tts.resolveAllSpeech();
+		tts.cancel("browser client disconnected");
+		finishSpeechPlayback("browser client disconnected");
 	}
 	if (event.type === "client_message") {
 		const msg = event.message;
@@ -246,6 +288,14 @@ async function handleWebsocketEvent(event: WebsocketEvent): Promise<void> {
 			return;
 		}
 		if (robot.handleMessage(msg)) return;
+		if (msg.type === "tts_playback_done") {
+			finishSpeechPlayback("client playback done");
+			return;
+		}
+		if (msg.type === "tts_playback_error") {
+			finishSpeechPlayback(`client playback error: ${msg.message}`);
+			return;
+		}
 		if (msg.type === "abort") await abortRobotTurn("client abort");
 		if (msg.type === "reset_session") {
 			serverLogger.log("session reset: client request");
@@ -257,7 +307,7 @@ async function handleWebsocketEvent(event: WebsocketEvent): Promise<void> {
 }
 
 onShutdown(async () => {
-	tts.stopChildProcess();
+	tts.stop();
 	stt.stopChildProcess();
 	llama.stop();
 	robot.stop();

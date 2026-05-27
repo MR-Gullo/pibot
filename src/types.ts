@@ -81,4 +81,10 @@ export type ServerMessage =
 	| RobotWireRequest
 	| RobotWireCancel;
 
-export type ClientMessage = ClientLogMsg | { type: "abort" } | { type: "reset_session" } | RobotWireResponse;
+export type ClientMessage =
+	| ClientLogMsg
+	| { type: "abort" }
+	| { type: "reset_session" }
+	| { type: "tts_playback_done" }
+	| { type: "tts_playback_error"; message: string }
+	| RobotWireResponse;
