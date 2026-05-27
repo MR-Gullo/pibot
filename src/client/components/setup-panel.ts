@@ -34,7 +34,10 @@ export class RobotSetupPanelElement extends HTMLElement {
 		label.append("Voice");
 		this.providerSelect = document.createElement("select");
 		this.providerSelect.id = "ttsProvider";
-		this.providerSelect.append(this.option("elevenlabs", "ElevenLabs pibot"), this.option("pocket", "Kyutai Pocket"));
+		this.providerSelect.append(
+			this.option("elevenlabs", "ElevenLabs pibot"),
+			this.option("qwen3", "Qwen3 local clone"),
+		);
 		this.providerSelect.addEventListener("change", () => this.dispatchEvent(new Event("tts-provider-change")));
 		label.append(this.providerSelect);
 		this.resetButton = document.createElement("button");

@@ -1,18 +1,18 @@
 import { type ChildProcess, spawn } from "node:child_process";
+import type { Logger } from "./logger.js";
 
 export interface SttServiceDeps {
 	workerPath: string;
-	onEvent?: (event: SttEvent) => void;
+	logger: Logger;
+	onEvent: (event: SttEvent) => void;
 }
 
 export interface SttService {
-	onEvent: (handler: (event: SttEvent) => void) => void;
 	handleAudioFrame: (data: Buffer) => void;
 	stopChildProcess: () => void;
 }
 
 export type SttEvent =
-	| { type: "loading" }
 	| {
 			type: "ready";
 			sampleRate: number;
@@ -22,14 +22,10 @@ export type SttEvent =
 			prerollMs: number;
 			interimIntervalMs?: number;
 	  }
-	| { type: "worker_log"; line: string }
-	| { type: "worker_exit"; code: number | null; signal: string | null }
-	| { type: "parse_error"; line: string; message: string }
 	| { type: "speech_start"; index: number }
 	| { type: "speech_end"; index: number; duration: number }
 	| { type: "speech_drop"; index: number; duration: number; reason: string }
 	| { type: "interim"; index: number; text: string; audioMs: number; decodeMs: number }
-	| { type: "stop_detected"; index: number; text: string; source: "interim" | "final" }
 	| { type: "final"; index: number; text: string; decodeMs: number }
 	| { type: "error"; message: string };
 
@@ -50,37 +46,6 @@ type SttWorkerMsg =
 	| { type: "interim"; index: number; text: string; audioMs: number; decodeMs: number }
 	| { type: "final"; index: number; text: string; duration: number; decodeMs: number }
 	| { type: "error"; message: string };
-
-const stopWordPhrases = [
-	"stop",
-	"stopp",
-	"halt",
-	"anhalten",
-	"abbrechen",
-	"schluss",
-	"ruhe",
-	"sei still",
-	"sei ruhig",
-	"hör auf",
-	"hoer auf",
-];
-
-function looksLikeStopCommand(text: string): boolean {
-	const normalized = text
-		.toLowerCase()
-		.normalize("NFKD")
-		.replace(/[.,!?;:()[\]{}"'`´]/g, " ")
-		.replace(/\s+/g, " ")
-		.trim();
-	if (!normalized) return false;
-	for (const phrase of stopWordPhrases) {
-		if (normalized === phrase) return true;
-		if (normalized.startsWith(`${phrase} `)) return true;
-		if (normalized.endsWith(` ${phrase}`)) return true;
-		if (normalized.includes(` ${phrase} `)) return true;
-	}
-	return false;
-}
 
 function streamLines(stream: NodeJS.ReadableStream | null | undefined, onLine: (line: string) => void): void {
 	if (!stream) return;
@@ -105,28 +70,23 @@ function streamLines(stream: NodeJS.ReadableStream | null | undefined, onLine: (
 export function createSttService(deps: SttServiceDeps): SttService {
 	let process: ChildProcess | undefined;
 	let stdout = "";
-	let stoppedUtteranceIndex: number | undefined;
-	const eventHandlers: Array<(event: SttEvent) => void> = deps.onEvent ? [deps.onEvent] : [];
-	let latestLifecycleEvent: SttEvent | undefined;
-	const emit = (event: SttEvent) => {
-		if (event.type === "loading" || event.type === "ready" || event.type === "error") latestLifecycleEvent = event;
-		for (const handler of eventHandlers) handler(event);
-	};
+	const logger = deps.logger.tag("stt");
+	const emit = deps.onEvent;
 
 	function startWorker(): void {
 		if (process && !process.killed) return;
 		stdout = "";
-		emit({ type: "loading" });
+		logger.log("loading Parakeet/Silero worker");
 		const child = spawn("uvx", ["--with", "parakeet-mlx", "--with", "silero-vad", "python", deps.workerPath], {
 			stdio: ["pipe", "pipe", "pipe"],
 		});
 		process = child;
 		child.stdout?.on("data", (data: Buffer) => handleStdout(data));
-		streamLines(child.stderr, (line) => emit({ type: "worker_log", line }));
+		streamLines(child.stderr, (line) => logger.log(line));
 		child.once("error", (error) => emit({ type: "error", message: error.message }));
 		child.once("exit", (code, signal) => {
 			if (process === child) process = undefined;
-			emit({ type: "worker_exit", code, signal });
+			logger.log(`Parakeet worker exited code=${code ?? "none"} signal=${signal ?? "none"}`);
 		});
 	}
 
@@ -141,7 +101,9 @@ export function createSttService(deps: SttServiceDeps): SttService {
 			try {
 				handleMessage(JSON.parse(line) as SttWorkerMsg);
 			} catch (error) {
-				emit({ type: "parse_error", line, message: error instanceof Error ? error.message : String(error) });
+				logger.log(
+					`failed to parse worker line: ${line}; ${error instanceof Error ? error.message : String(error)}`,
+				);
 			}
 		}
 	}
@@ -160,7 +122,6 @@ export function createSttService(deps: SttServiceDeps): SttService {
 			return;
 		}
 		if (message.type === "speech_start") {
-			stoppedUtteranceIndex = undefined;
 			emit({ type: "speech_start", index: message.index });
 			return;
 		}
@@ -173,27 +134,17 @@ export function createSttService(deps: SttServiceDeps): SttService {
 			return;
 		}
 		if (message.type === "interim") {
-			const text = message.text.trim();
-			emit({ type: "interim", index: message.index, text, audioMs: message.audioMs, decodeMs: message.decodeMs });
-			if (text && looksLikeStopCommand(text) && stoppedUtteranceIndex !== message.index) {
-				stoppedUtteranceIndex = message.index;
-				emit({ type: "stop_detected", index: message.index, text, source: "interim" });
-			}
+			emit({
+				type: "interim",
+				index: message.index,
+				text: message.text.trim(),
+				audioMs: message.audioMs,
+				decodeMs: message.decodeMs,
+			});
 			return;
 		}
 		if (message.type === "final") {
-			const text = message.text.trim();
-			if (!text) {
-				emit({ type: "final", index: message.index, text, decodeMs: message.decodeMs });
-				return;
-			}
-			if (stoppedUtteranceIndex === message.index) return;
-			if (looksLikeStopCommand(text)) {
-				stoppedUtteranceIndex = message.index;
-				emit({ type: "stop_detected", index: message.index, text, source: "final" });
-				return;
-			}
-			emit({ type: "final", index: message.index, text, decodeMs: message.decodeMs });
+			emit({ type: "final", index: message.index, text: message.text.trim(), decodeMs: message.decodeMs });
 			return;
 		}
 		emit({ type: "error", message: message.message });
@@ -212,12 +163,5 @@ export function createSttService(deps: SttServiceDeps): SttService {
 	}
 
 	startWorker();
-	return {
-		onEvent: (handler) => {
-			eventHandlers.push(handler);
-			if (latestLifecycleEvent) handler(latestLifecycleEvent);
-		},
-		handleAudioFrame,
-		stopChildProcess,
-	};
+	return { handleAudioFrame, stopChildProcess };
 }

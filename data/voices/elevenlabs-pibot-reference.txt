@@ -1,0 +1,1 @@
+Hello, I am Pipi, your small robot friend. I can talk with you, remember useful details, take photos, and drive around the room. Please listen to the natural rhythm, tone, and personality of this voice, because this recording will be used as a clean voice reference for open source speech synthesis.

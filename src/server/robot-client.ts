@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { WebSocket } from "ws";
-import type { ClientMessage, RobotRpcMap, RobotRpcType, RobotWireResponse } from "../types.js";
+import type { ClientMessage, RobotRpcMap, RobotRpcType, RobotWireCancel, RobotWireResponse } from "../types.js";
 
 type RobotRpcResponse = RobotRpcMap[RobotRpcType]["response"];
 
@@ -9,6 +9,7 @@ interface PendingRobotRequest {
 	resolve: (value: RobotRpcResponse) => void;
 	reject: (error: Error) => void;
 	timeout: NodeJS.Timeout | undefined;
+	cleanup: () => void;
 }
 
 export class RobotClient {
@@ -43,24 +44,47 @@ export class RobotClient {
 		type: T;
 		payload: RobotRpcMap[T]["request"];
 		timeoutMs: number | null;
+		signal?: AbortSignal;
 	}): Promise<RobotRpcMap[T]["response"]> {
+		if (request.signal?.aborted) throw new Error(`Robot request aborted: ${request.type}`);
 		const client = this.current;
 		if (!client || client.readyState !== WebSocket.OPEN) throw new Error("Robot client not connected");
 		const id = randomUUID();
-		client.send(JSON.stringify({ type: "robot_request", id, request }));
 		return await new Promise<RobotRpcMap[T]["response"]>((resolve, reject) => {
 			const timeout =
 				request.timeoutMs === null
 					? undefined
 					: setTimeout(() => {
-							this.rejectPending(id, new Error(`Robot request timed out: ${request.type}`));
+							const reason = `Robot request timed out: ${request.type}`;
+							this.cancelRemote(id, reason);
+							this.rejectPending(id, new Error(reason));
 						}, request.timeoutMs);
+			const onAbort = () => {
+				const reason = `Robot request aborted: ${request.type}`;
+				this.cancelRemote(id, reason);
+				this.rejectPending(id, new Error(reason));
+			};
 			this.pending.set(id, {
 				requestType: request.type,
 				resolve: (value) => resolve(value as RobotRpcMap[T]["response"]),
 				reject,
 				timeout,
+				cleanup: () => request.signal?.removeEventListener("abort", onAbort),
 			});
+			if (request.signal) {
+				request.signal.addEventListener("abort", onAbort, { once: true });
+				if (request.signal.aborted) {
+					onAbort();
+					return;
+				}
+			}
+			try {
+				client.send(
+					JSON.stringify({ type: "robot_request", id, request: { type: request.type, payload: request.payload } }),
+				);
+			} catch (error) {
+				this.rejectPending(id, error instanceof Error ? error : new Error(String(error)));
+			}
 		});
 	}
 
@@ -71,6 +95,17 @@ export class RobotClient {
 	stop(): void {
 		clearInterval(this.heartbeat);
 		this.rejectAll("Robot client stopped");
+	}
+
+	private cancelRemote(requestId: string, reason: string): void {
+		const client = this.current;
+		if (!client || client.readyState !== WebSocket.OPEN) return;
+		const message: RobotWireCancel = { type: "robot_cancel", id: requestId, reason };
+		try {
+			client.send(JSON.stringify(message));
+		} catch {
+			// best-effort cancellation
+		}
 	}
 
 	private resolveResponse(response: RobotWireResponse): void {
@@ -84,6 +119,7 @@ export class RobotClient {
 			return;
 		}
 		if (pending.timeout) clearTimeout(pending.timeout);
+		pending.cleanup();
 		this.pending.delete(response.id);
 		if (response.error) {
 			pending.reject(new Error(response.error));
@@ -100,6 +136,7 @@ export class RobotClient {
 		const pending = this.pending.get(id);
 		if (!pending) return;
 		if (pending.timeout) clearTimeout(pending.timeout);
+		pending.cleanup();
 		this.pending.delete(id);
 		pending.reject(error);
 	}

@@ -11,10 +11,16 @@ public/app.js
 
 # local runtime data
 /data/*.json
+/data/voices/*
+!/data/voices/elevenlabs-pibot-reference*
 
 # native build artifacts
 native/pibot-stt/build/
 models/
+
+# python bytecode
+__pycache__/
+*.pyc
 
 # logs/pids
 *.log

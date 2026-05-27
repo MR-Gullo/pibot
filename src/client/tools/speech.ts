@@ -1,7 +1,7 @@
 import type { RobotRpcMap } from "../../types.js";
 import type { ClientLogger } from "../logger.js";
 
-export type TtsProvider = "elevenlabs" | "pocket";
+export type TtsProvider = "elevenlabs" | "qwen3";
 export type ConversationPhase = "inactive" | "listening" | "thinking" | "speaking";
 
 interface ActiveSpeech {
@@ -47,7 +47,7 @@ export function createSpeechTool(deps: {
 	let audioContext: AudioContext | undefined;
 	let ttsGeneration = 0;
 	let activeSpeech: ActiveSpeech | undefined;
-	deps.ttsProviderControl.value = localStorage.getItem(ttsProviderKey) ?? "elevenlabs";
+	deps.ttsProviderControl.value = localStorage.getItem(ttsProviderKey) === "qwen3" ? "qwen3" : "elevenlabs";
 
 	function startFaceAmpLoop(analyser: AnalyserNode): () => void {
 		const data = new Uint8Array(analyser.fftSize);
@@ -221,11 +221,11 @@ export function createSpeechTool(deps: {
 	}
 
 	function selectedTtsProvider(): TtsProvider {
-		return deps.ttsProviderControl.value === "pocket" ? "pocket" : "elevenlabs";
+		return deps.ttsProviderControl.value === "qwen3" ? "qwen3" : "elevenlabs";
 	}
 
 	function ttsProviderLabel(provider: TtsProvider): string {
-		return provider === "pocket" ? "Pocket TTS" : "ElevenLabs pibot";
+		return provider === "qwen3" ? "Qwen3 local clone" : "ElevenLabs pibot";
 	}
 
 	function startSpeech(url: string, text: string, generation: number): void {

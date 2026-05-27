@@ -7,7 +7,6 @@ import { createPhotoTool } from "./photo.js";
 import { pageContentTool, webSearchTool } from "./websearch.js";
 
 export { pruneImagesForContext } from "./context.js";
-export { stopMotorFireAndForget } from "./motor.js";
 
 export function createRobotTools(robot: RobotClient, memoryStore: MemoryStore): AgentTool[] {
 	return [

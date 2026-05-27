@@ -1,6 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import { extname, join } from "node:path";
+import { extname, relative, resolve } from "node:path";
 
 export interface HttpServer {
 	server: Server;
@@ -11,6 +11,12 @@ function contentTypeFor(file: string): string {
 	if (extension === ".js") return "text/javascript; charset=utf-8";
 	if (extension === ".css") return "text/css; charset=utf-8";
 	return "text/html; charset=utf-8";
+}
+
+function errorStatus(error: unknown): number {
+	if (typeof error !== "object" || error === null || !("status" in error)) return 500;
+	const status = (error as { status?: unknown }).status;
+	return typeof status === "number" ? status : 500;
 }
 
 async function writeAudioResponse(response: Response, contentType: string, res: ServerResponse): Promise<void> {
@@ -35,8 +41,10 @@ async function serveStaticFile(
 ): Promise<void> {
 	const url = new URL(req.url ?? "/", `http://${req.headers.host}`);
 	const path = url.pathname === "/" ? "/index.html" : url.pathname;
-	const file = join(publicDir, path);
-	if (!file.startsWith(publicDir)) {
+	const publicRoot = resolve(publicDir);
+	const file = resolve(publicRoot, `.${path}`);
+	const relativePath = relative(publicRoot, file);
+	if (relativePath.startsWith("..") || relativePath.startsWith("/") || relativePath === "") {
 		res.writeHead(403).end();
 		return;
 	}
@@ -87,7 +95,7 @@ export function createHttpServer(deps: {
 				);
 				await writeAudioResponse(audio.response, audio.contentType, res);
 			} catch (error) {
-				res.writeHead(500, { "content-type": "application/json" });
+				res.writeHead(errorStatus(error), { "content-type": "application/json" });
 				res.end(JSON.stringify({ error: error instanceof Error ? error.message : String(error) }));
 			}
 			return;

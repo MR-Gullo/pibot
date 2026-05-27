@@ -1,26 +1,30 @@
 import type { Server } from "node:http";
 import { WebSocket, WebSocketServer } from "ws";
 import type { ClientMessage } from "../types.js";
-import { createEventEmitter, type EventSource } from "./events.js";
+import type { Logger } from "./logger.js";
 
 export type WebsocketEvent =
 	| { type: "client_connected"; client: WebSocket }
 	| { type: "client_disconnected"; client: WebSocket }
-	| { type: "client_rejected"; reason: string }
 	| { type: "audio_frame"; data: Buffer }
-	| { type: "client_message"; message: ClientMessage }
-	| { type: "message_error"; message: string };
+	| { type: "client_message"; message: ClientMessage };
 
-export interface WebsocketServer extends EventSource<WebsocketEvent> {
+export interface WebsocketServer {
 	broadcast: (message: object) => void;
 }
 
 export function attachWebSockets(deps: {
 	server: Server;
-	onEvent?: (event: WebsocketEvent) => void | Promise<void>;
+	logger: Logger;
+	onEvent: (event: WebsocketEvent) => void | Promise<void>;
 }): WebsocketServer {
 	let activeClient: WebSocket | undefined;
-	const events = createEventEmitter<WebsocketEvent>(deps.onEvent ? [deps.onEvent] : []);
+	const logger = deps.logger.tag("server");
+	const emit = (event: WebsocketEvent) => {
+		void Promise.resolve(deps.onEvent(event)).catch((error) => {
+			console.error(`[websocket] event handler failed: ${error instanceof Error ? error.message : String(error)}`);
+		});
+	};
 	const robotWss = new WebSocketServer({ noServer: true });
 	const reloadWss = new WebSocketServer({ noServer: true });
 
@@ -32,30 +36,29 @@ export function attachWebSockets(deps: {
 
 	robotWss.on("connection", (ws) => {
 		if (activeClient?.readyState === WebSocket.OPEN) {
-			const reason = "Only one client may connect";
-			events.emit({ type: "client_rejected", reason });
-			ws.close(1008, reason);
+			logger.log("rejected extra ws client");
+			ws.close(1008, "Only one client may connect");
 			return;
 		}
 		activeClient = ws;
-		events.emit({ type: "client_connected", client: ws });
+		emit({ type: "client_connected", client: ws });
 		ws.on("message", (data, isBinary) => {
 			try {
 				if (isBinary) {
-					events.emit({
+					emit({
 						type: "audio_frame",
 						data: Buffer.isBuffer(data) ? data : Buffer.from(data as ArrayBuffer),
 					});
 					return;
 				}
-				events.emit({ type: "client_message", message: JSON.parse(String(data)) as ClientMessage });
+				emit({ type: "client_message", message: JSON.parse(String(data)) as ClientMessage });
 			} catch (error) {
-				events.emit({ type: "message_error", message: error instanceof Error ? error.message : String(error) });
+				logger.tag("error").log(error instanceof Error ? error.message : String(error));
 			}
 		});
 		ws.on("close", () => {
 			if (activeClient === ws) activeClient = undefined;
-			events.emit({ type: "client_disconnected", client: ws });
+			emit({ type: "client_disconnected", client: ws });
 		});
 	});
 
@@ -64,7 +67,6 @@ export function attachWebSockets(deps: {
 	});
 
 	return {
-		onEvent: events.onEvent,
 		broadcast: (message: object) => {
 			if (activeClient?.readyState === WebSocket.OPEN) activeClient.send(JSON.stringify(message));
 		},

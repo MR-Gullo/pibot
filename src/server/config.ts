@@ -8,6 +8,7 @@ export const serverConfig = {
 	port: Number(process.env.PORT ?? 8010),
 	host: process.env.HOST ?? "127.0.0.1",
 	parakeetSttWorkerPath: resolve(serverDir, "../../scripts/parakeet-stt-worker.py"),
+	qwen3TtsWorkerPath: resolve(serverDir, "../../scripts/qwen3-tts-worker.py"),
 	version: String(Date.now()),
 	maxContextImages: Number(process.env.MAX_CONTEXT_IMAGES ?? 4),
 	memoryFile: process.env.MEMORY_FILE ?? "data/memories.json",

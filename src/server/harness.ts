@@ -10,7 +10,7 @@ import {
 	type Model,
 	type TextContent,
 } from "@earendil-works/pi-ai";
-import { createEventEmitter, type EventSource } from "./events.js";
+import type { Logger } from "./logger.js";
 import type { RobotClient } from "./robot-client.js";
 import { createRobotTools, pruneImagesForContext } from "./tools/index.js";
 import type { MemoryStore } from "./tools/memory.js";
@@ -53,24 +53,31 @@ export type RobotHarnessEvent =
 	| { type: "assistant_start" }
 	| { type: "tool_start"; name: string; args: unknown }
 	| { type: "assistant_end"; text: string }
-	| { type: "context_pruned"; removedImages: number; keptImages: number }
 	| { type: "session_reset"; reason: string };
 
-export interface RobotHarness extends EventSource<RobotHarnessEvent> {
+export interface RobotHarness {
 	current: () => AgentHarness;
-	reset: (reason: string) => Promise<void>;
+	rebuildSession: (reason: string) => Promise<void>;
 }
 
 export async function createRobotHarness(deps: {
 	env: NodeExecutionEnv;
+	logger: Logger;
 	memoryStore: MemoryStore;
 	maxContextImages: number;
 	robot: RobotClient;
-	onEvent?: (event: RobotHarnessEvent) => void | Promise<void>;
+	onEvent: (event: RobotHarnessEvent) => void | Promise<void>;
 }): Promise<RobotHarness> {
-	const events = createEventEmitter<RobotHarnessEvent>(deps.onEvent ? [deps.onEvent] : []);
 	const sessionRepo = new InMemorySessionRepo();
 	const tools = createRobotTools(deps.robot, deps.memoryStore);
+	const contextLogger = deps.logger.tag("context");
+	const emit = async (event: RobotHarnessEvent): Promise<void> => {
+		try {
+			await deps.onEvent(event);
+		} catch (error) {
+			console.error(`[harness] event handler failed: ${error instanceof Error ? error.message : String(error)}`);
+		}
+	};
 	let harness = await buildHarness();
 
 	async function buildHarness(): Promise<AgentHarness> {
@@ -87,36 +94,31 @@ export async function createRobotHarness(deps: {
 			tools,
 			systemPrompt: async () => buildSystemPrompt(deps.memoryStore),
 		});
-		newHarness.on("context", (event) => {
+		newHarness.on("context", async (event) => {
 			const context = pruneImagesForContext(event.messages, deps.maxContextImages);
 			if (context.removedImages > 0) {
-				events.emit({
-					type: "context_pruned",
-					removedImages: context.removedImages,
-					keptImages: deps.maxContextImages,
-				});
+				contextLogger.log(`removed ${context.removedImages} old image(s), kept ${deps.maxContextImages}`);
 			}
 			return { messages: context.messages };
 		});
 		newHarness.subscribe(async (event) => {
 			if (event.type === "message_start" && event.message.role === "assistant")
-				events.emit({ type: "assistant_start" });
+				await emit({ type: "assistant_start" });
 			if (event.type === "tool_execution_start") {
-				events.emit({ type: "tool_start", name: event.toolName, args: event.args });
+				await emit({ type: "tool_start", name: event.toolName, args: event.args });
 			}
 			if (event.type === "message_end" && event.message.role === "assistant") {
-				events.emit({ type: "assistant_end", text: extractAssistantText(event.message) });
+				await emit({ type: "assistant_end", text: extractAssistantText(event.message) });
 			}
 		});
 		return newHarness;
 	}
 
 	return {
-		onEvent: events.onEvent,
 		current: () => harness,
-		reset: async (reason) => {
+		rebuildSession: async (reason) => {
 			harness = await buildHarness();
-			events.emit({ type: "session_reset", reason });
+			await emit({ type: "session_reset", reason });
 		},
 	};
 }
