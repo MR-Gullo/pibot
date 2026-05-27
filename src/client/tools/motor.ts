@@ -87,10 +87,6 @@ function turnProgressDegrees(start: number, current: number, direction: TurnDire
 	return direction === 1 ? normalizeDegrees(current - start) : normalizeDegrees(start - current);
 }
 
-function formatDegrees(value: number | null | undefined): string {
-	return typeof value === "number" && Number.isFinite(value) ? `${value.toFixed(1)}°` : "-";
-}
-
 function motorCommandPins(command: MotorCommand): number {
 	if (command === "forward") return FT232H_FORWARD_PIN;
 	if (command === "turn_left" || command === "turn_left_degrees") return FT232H_TURN_LEFT_PIN;
@@ -111,7 +107,7 @@ function chooseTurnDirection(
 	return 1;
 }
 
-export function createMotorTool(deps: { logger: ClientLogger; gyroStatus: HTMLElement }): MotorTool {
+export function createMotorTool(deps: { logger: ClientLogger }): MotorTool {
 	const logger = deps.logger.tag("hardware");
 	const robotLogger = deps.logger.tag("robot");
 	const orientationLogger = deps.logger.tag("orientation");
@@ -124,9 +120,6 @@ export function createMotorTool(deps: { logger: ClientLogger; gyroStatus: HTMLEl
 	let orientationTracking = false;
 	let currentHeading: number | undefined;
 	let currentHeadingAt = 0;
-	let currentOrientationAlpha: number | null = null;
-	let currentOrientationBeta: number | null = null;
-	let currentOrientationGamma: number | null = null;
 	let currentCompassHeading: number | undefined;
 	let orientationSampleCount = 0;
 
@@ -212,15 +205,8 @@ export function createMotorTool(deps: { logger: ClientLogger; gyroStatus: HTMLEl
 		await ftWritePins(0);
 	}
 
-	function updateGyroStatus(): void {
-		deps.gyroStatus.textContent = `Gyro: heading=${formatDegrees(currentHeading)} alpha=${formatDegrees(currentOrientationAlpha)} beta=${formatDegrees(currentOrientationBeta)} gamma=${formatDegrees(currentOrientationGamma)} compass=${formatDegrees(currentCompassHeading)}`;
-	}
-
 	function handleOrientation(event: DeviceOrientationEvent): void {
 		const withCompass = event as DeviceOrientationEvent & { webkitCompassHeading?: number };
-		currentOrientationAlpha = event.alpha;
-		currentOrientationBeta = event.beta;
-		currentOrientationGamma = event.gamma;
 		currentCompassHeading =
 			typeof withCompass.webkitCompassHeading === "number" && Number.isFinite(withCompass.webkitCompassHeading)
 				? normalizeDegrees(withCompass.webkitCompassHeading)
@@ -231,7 +217,6 @@ export function createMotorTool(deps: { logger: ClientLogger; gyroStatus: HTMLEl
 			currentHeadingAt = Date.now();
 			orientationSampleCount++;
 		}
-		updateGyroStatus();
 	}
 
 	async function waitForHeading(
@@ -269,7 +254,6 @@ export function createMotorTool(deps: { logger: ClientLogger; gyroStatus: HTMLEl
 		}
 		window.addEventListener("deviceorientation", handleOrientation);
 		orientationTracking = true;
-		updateGyroStatus();
 		await waitForHeading(1200);
 		orientationLogger.log(
 			`Orientation tracking ${currentHeading === undefined ? "started without heading yet" : `heading=${currentHeading.toFixed(1)}°`}`,

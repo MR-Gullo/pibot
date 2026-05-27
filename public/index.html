@@ -11,30 +11,13 @@
 	<body>
 		<section id="setup">
 			<h1>Pipi</h1>
-			<p>Phone-powered robot face and control.</p>
-			<div class="panel">
-				<button id="startAll" class="primary">Start robot</button>
-				<div class="controls">
-					<label>
-						Voice
-						<select id="ttsProvider">
-							<option value="elevenlabs">ElevenLabs pibot</option>
-							<option value="pocket">Kyutai Pocket</option>
-						</select>
-					</label>
-					<button id="resetSession">Reset session</button>
-				</div>
-			</div>
-			<div id="gyroStatus" class="status">Gyro: not active</div>
-			<pre id="log"></pre>
+			<p>Phone-powered robot.</p>
+			<robot-face id="setupFace" class="setup-face" state="inactive"></robot-face>
+			<robot-setup-panel id="setupPanel"></robot-setup-panel>
+			<robot-log id="log"></robot-log>
 		</section>
 		<section id="robot" hidden>
-			<div id="face" class="face inactive">
-				<div class="brow left"></div>
-				<div class="brow right"></div>
-				<div class="eye left"></div>
-				<div class="eye right"></div>
-			</div>
+			<robot-face id="face" state="inactive"></robot-face>
 			<button id="back">setup</button>
 		</section>
 		<script src="app.js?v=dev"></script>

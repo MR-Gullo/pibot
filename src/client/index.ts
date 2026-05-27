@@ -1,41 +1,33 @@
-import type { ClientMessage, LogOrigin, RobotState } from "../types.js";
+import type { ClientMessage, RobotState } from "../types.js";
+import "./components/robot-face.js";
+import type { RobotFaceElement, RobotFaceState } from "./components/robot-face.js";
+import "./components/robot-log.js";
+import type { RobotLogElement } from "./components/robot-log.js";
+import "./components/setup-panel.js";
+import type { RobotSetupPanelElement } from "./components/setup-panel.js";
 import { BrowserClientLogger } from "./logger.js";
 import { RobotServer } from "./robot-server.js";
 import { createRobotTools } from "./tools/index.js";
 import type { ConversationPhase } from "./tools/speech.js";
 
-type RobotFaceState = "inactive" | "listening" | "hearing" | "thinking" | "speaking" | "tool" | "error";
-
 const setup = document.querySelector<HTMLElement>("#setup");
 const robot = document.querySelector<HTMLElement>("#robot");
-const logEl = document.querySelector<HTMLElement>("#log");
-const face = document.querySelector<HTMLElement>("#face");
+const logEl = document.querySelector<RobotLogElement>("#log");
+const face = document.querySelector<RobotFaceElement>("#face");
+const setupFace = document.querySelector<RobotFaceElement>("#setupFace");
+const setupPanel = document.querySelector<RobotSetupPanelElement>("#setupPanel");
 const backButton = document.querySelector<HTMLButtonElement>("#back");
-const ttsProviderSelect = document.querySelector<HTMLSelectElement>("#ttsProvider");
-const startAllButton = document.querySelector<HTMLButtonElement>("#startAll");
-const resetSessionButton = document.querySelector<HTMLButtonElement>("#resetSession");
-const gyroStatusEl = document.querySelector<HTMLElement>("#gyroStatus");
 
-if (
-	!setup ||
-	!robot ||
-	!logEl ||
-	!face ||
-	!backButton ||
-	!ttsProviderSelect ||
-	!startAllButton ||
-	!resetSessionButton ||
-	!gyroStatusEl
-) {
+if (!setup || !robot || !logEl || !face || !setupFace || !setupPanel || !backButton) {
 	throw new Error("Missing required DOM elements");
 }
 
-const logOutput = logEl;
+const robotLog = logEl;
 const robotFace = face;
+const setupPanelElement = setupPanel;
 const setupSection = setup;
 const robotSection = robot;
-const ttsProviderControl = ttsProviderSelect;
-const gyroStatus = gyroStatusEl;
+const robotFaces = [setupFace, robotFace];
 const wsProtocol = location.protocol === "https:" ? "wss" : "ws";
 const targetSttSampleRate = 16000;
 const clientLogger = new BrowserClientLogger();
@@ -71,30 +63,6 @@ window.addEventListener("unhandledrejection", (event) => {
 	clientLogger.tag("error").log(`unhandled rejection: ${stringifyLogValue(event.reason)}`);
 });
 
-const tagColors = ["#45d9ff", "#d783ff", "#ffd166", "#6ee7a8", "#7aa2ff", "#ff6b7a", "#9ca3af"];
-
-function tagColor(tag: string): string {
-	let hash = 0;
-	for (let i = 0; i < tag.length; i++) hash = (hash * 31 + tag.charCodeAt(i)) | 0;
-	return tagColors[Math.abs(hash) % tagColors.length]!;
-}
-
-function appendStructuredLogLine(origin: LogOrigin, tags: string[], message: string): void {
-	const line = document.createElement("div");
-	const displayTags = [origin, ...tags.filter((tag, index) => index !== 0 || tag !== origin)];
-	line.append(`${new Date().toLocaleTimeString()} `);
-	for (const tag of displayTags) {
-		const span = document.createElement("span");
-		span.textContent = `[${tag}]`;
-		span.style.color = tagColor(tag);
-		line.append(span);
-	}
-	line.append(` ${message}`);
-	line.className = displayTags.join(" ");
-	logOutput.append(line);
-	logOutput.scrollTop = logOutput.scrollHeight;
-}
-
 function log(text: string, tag = ""): void {
 	(tag ? clientLogger.tag(tag) : clientLogger).log(text);
 }
@@ -113,7 +81,7 @@ function renderRobotFace(): void {
 	const next = deriveRobotFaceState();
 	if (next === currentFaceState) return;
 	currentFaceState = next;
-	robotFace.className = `face ${next}`;
+	for (const faceElement of robotFaces) faceElement.state = next;
 }
 
 function showErrorFor(durationMs: number): void {
@@ -150,8 +118,7 @@ function setMicInputBlockedUntil(time: number): void {
 
 const tools = createRobotTools({
 	logger: clientLogger,
-	gyroStatus,
-	ttsProviderControl,
+	ttsProviderControl: setupPanelElement.ttsProviderControl,
 	face: robotFace,
 	setPhase,
 	resetToListeningOrIdle,
@@ -169,10 +136,10 @@ robotServer = new RobotServer({
 			serverRobotState = state;
 			renderRobotFace();
 		},
-		onLog: (entry) => appendStructuredLogLine(entry.origin, entry.tags, entry.message),
+		onLog: (entry) => robotLog.appendLine(entry.origin, entry.tags, entry.message),
 		onRejected: (reason) => {
 			showErrorFor(5000);
-			appendStructuredLogLine("client", ["error"], `connection rejected: ${reason}`);
+			robotLog.appendLine("client", ["error"], `connection rejected: ${reason}`);
 		},
 	},
 });
@@ -307,13 +274,12 @@ async function enterRobotMode(): Promise<void> {
 	}
 }
 
-startAllButton.onclick = async () => {
+async function startRobot(): Promise<void> {
 	if (robotStarted) {
 		void enterRobotMode();
 		return;
 	}
-	startAllButton.disabled = true;
-	startAllButton.textContent = "Starting...";
+	setupPanelElement.mode = "starting";
 	try {
 		tools.speech.enableTts();
 		log(`TTS enabled: ${tools.speech.ttsProviderLabel(tools.speech.selectedTtsProvider())}`, "stt");
@@ -335,16 +301,16 @@ startAllButton.onclick = async () => {
 		}
 		await startRecognition();
 		robotStarted = true;
-		startAllButton.textContent = "Show face";
-		startAllButton.disabled = false;
+		setupPanelElement.mode = "started";
 		await enterRobotMode();
 	} catch (error) {
 		robotStarted = false;
-		startAllButton.textContent = "Start robot";
-		startAllButton.disabled = false;
+		setupPanelElement.mode = "idle";
 		throw error;
 	}
-};
+}
+
+setupPanelElement.addEventListener("start-robot", () => void startRobot());
 
 backButton.onclick = async () => {
 	robot.hidden = true;
@@ -373,12 +339,12 @@ function handleRobotTouch(event: PointerEvent): void {
 
 robotSection.addEventListener("pointerdown", handleRobotTouch);
 
-resetSessionButton.onclick = () => {
+setupPanelElement.addEventListener("reset-session", () => {
 	if (!confirm("Reset session? All context messages will be lost.")) return;
 	send({ type: "reset_session" });
 	log("session reset requested", "ui");
-};
+});
 
 tools.photo.startIfPreviouslyEnabled();
 
-ttsProviderControl.onchange = () => tools.speech.handleProviderChange();
+setupPanelElement.addEventListener("tts-provider-change", () => tools.speech.handleProviderChange());

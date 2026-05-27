@@ -25,7 +25,6 @@ export interface RobotTools {
 
 export function createRobotTools(deps: {
 	logger: ClientLogger;
-	gyroStatus: HTMLElement;
 	ttsProviderControl: HTMLSelectElement;
 	face: HTMLElement;
 	setPhase: (phase: ConversationPhase) => void;
@@ -35,7 +34,7 @@ export function createRobotTools(deps: {
 	onSpeakingChange: (speaking: boolean) => void;
 }): RobotTools {
 	const photo = createPhotoTool({ logger: deps.logger });
-	const motor = createMotorTool({ logger: deps.logger, gyroStatus: deps.gyroStatus });
+	const motor = createMotorTool({ logger: deps.logger });
 	const speech = createSpeechTool({
 		logger: deps.logger,
 		ttsProviderControl: deps.ttsProviderControl,

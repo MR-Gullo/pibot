@@ -90,24 +90,17 @@ button.primary:disabled {
 	cursor: default;
 }
 
-.status {
-	margin: 1rem 0;
-	padding: 0.75rem 0.9rem;
-	border: 1px solid rgba(68, 224, 255, 0.18);
-	border-radius: 14px;
-	background: rgba(45, 180, 220, 0.08);
-	color: #bcefff;
-	font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-}
-
-pre {
-	margin: 0;
+robot-log {
+	display: block;
+	margin: 2rem 0 0;
 	background: rgba(0, 0, 0, 0.58);
 	border: 1px solid rgba(255, 255, 255, 0.08);
 	border-radius: 18px;
 	padding: 1rem;
 	height: 45vh;
 	overflow: auto;
+	white-space: pre;
+	font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }
 
 #robot {
@@ -125,6 +118,7 @@ pre {
 }
 
 .face {
+	display: block;
 	--amp: 0;
 	--eye-top: #d7ffff;
 	--eye-mid: #58e8ff;
@@ -136,15 +130,25 @@ pre {
 	--face-glow-amp: rgba(64, 240, 255, 0.55);
 	--brow-mid: #9ff5ff;
 	--brow-glow: rgba(190, 250, 255, 0.55);
+	--look-x: 0%;
+	--look-y: 0%;
+	--eye-scale-x: 1;
+	--eye-scale-y: 1;
+	--eye-brightness: 1;
 	position: relative;
-	width: 82vw;
-	height: 54vw;
-	max-width: 720px;
-	max-height: 460px;
+	width: min(82vw, 720px);
+	aspect-ratio: 720 / 460;
+	max-height: 54vw;
 	filter:
 		drop-shadow(0 0 28px var(--face-glow))
 		drop-shadow(0 0 calc(60px * var(--amp)) var(--face-glow-amp));
 	transition: filter 220ms ease, transform 160ms ease;
+}
+
+.setup-face {
+	width: min(720px, 100%);
+	max-height: none;
+	margin: 0.5rem auto 2rem;
 }
 
 .eye {
@@ -159,8 +163,15 @@ pre {
 		0 0 72px var(--eye-glow-soft),
 		inset 0 -14px 24px var(--eye-inset);
 	transform-origin: center;
+	translate: var(--look-x) var(--look-y);
+	transform: scale(var(--eye-scale-x), var(--eye-scale-y));
+	filter: brightness(var(--eye-brightness));
 	animation: inactive-blink 5.5s infinite;
-	transition: box-shadow 220ms ease;
+	transition:
+		box-shadow 260ms ease,
+		translate 520ms cubic-bezier(0.22, 1, 0.36, 1),
+		transform 260ms cubic-bezier(0.22, 1, 0.36, 1),
+		filter 260ms ease;
 }
 
 .eye.left {
@@ -205,7 +216,7 @@ pre {
 }
 
 .face.inactive .eye {
-	animation: inactive-blink 4.8s infinite, inactive-look 13s infinite ease-in-out;
+	animation: inactive-blink 3.4s infinite;
 }
 
 .face.inactive .brow.left {
@@ -217,7 +228,9 @@ pre {
 }
 
 .face.listening .eye {
-	animation: attentive-blink 4s infinite, attentive-scan 2.6s infinite ease-in-out;
+	animation: attentive-blink 4s infinite;
+	--look-x: 2%;
+	--look-y: 0%;
 }
 
 .face.listening .brow.left {
@@ -229,7 +242,9 @@ pre {
 }
 
 .face.hearing .eye {
-	animation: hearing-pulse 420ms infinite alternate ease-in-out;
+	animation: none;
+	--eye-scale-x: 1.12;
+	--eye-scale-y: 1.12;
 }
 
 .face.hearing .brow.left {
@@ -254,8 +269,12 @@ pre {
 }
 
 .face.thinking .eye {
-	animation: thinking-gaze 3.6s infinite ease-in-out, thinking-blink 6.2s infinite;
-	filter: brightness(0.92);
+	animation: thinking-pulse 3.6s infinite ease-in-out, thinking-blink 6.2s infinite;
+	--look-x: 0%;
+	--look-y: 0%;
+	--eye-scale-x: 0.92;
+	--eye-scale-y: 0.92;
+	--eye-brightness: 0.92;
 }
 
 .face.thinking .brow.left {
@@ -280,19 +299,24 @@ pre {
 }
 
 .face.speaking .eye {
-	animation: none;
-	transform: scaleY(calc(0.86 + var(--amp) * 0.32));
-	filter: brightness(calc(0.95 + var(--amp) * 0.6));
-	transition: transform 60ms linear, filter 60ms linear;
+	animation: speaking-warmup 720ms infinite alternate ease-in-out;
+	--eye-scale-x: 1;
+	--eye-scale-y: calc(0.86 + max(var(--amp), 0.08) * 0.32);
+	--eye-brightness: calc(0.95 + max(var(--amp), 0.08) * 0.6);
+	transition:
+		box-shadow 180ms ease,
+		translate 260ms cubic-bezier(0.22, 1, 0.36, 1),
+		transform 80ms linear,
+		filter 80ms linear;
 }
 
 .face.speaking .brow.left {
-	transform: rotate(calc(2deg + var(--amp) * 6deg)) translateY(calc(8% - var(--amp) * 6%));
+	transform: rotate(calc(2deg + max(var(--amp), 0.08) * 6deg)) translateY(calc(8% - max(var(--amp), 0.08) * 6%));
 	transition: transform 90ms linear;
 }
 
 .face.speaking .brow.right {
-	transform: rotate(calc(-2deg - var(--amp) * 6deg)) translateY(calc(8% - var(--amp) * 6%));
+	transform: rotate(calc(-2deg - max(var(--amp), 0.08) * 6deg)) translateY(calc(8% - max(var(--amp), 0.08) * 6%));
 	transition: transform 90ms linear;
 }
 
@@ -309,7 +333,9 @@ pre {
 }
 
 .face.tool .eye {
-	animation: tool-squint 360ms infinite alternate ease-in-out;
+	animation: none;
+	--eye-scale-x: 1.06;
+	--eye-scale-y: 0.82;
 }
 
 .face.error {
@@ -367,11 +393,11 @@ pre {
 	52%,
 	92%,
 	100% {
-		transform: scaleY(1);
+		transform: scale(var(--eye-scale-x), var(--eye-scale-y));
 	}
 	48%,
 	95% {
-		transform: scaleY(0.08);
+		transform: scale(var(--eye-scale-x), calc(var(--eye-scale-y) * 0.08));
 	}
 }
 
@@ -382,37 +408,6 @@ pre {
 	}
 	50% {
 		transform: scale(1.012);
-	}
-}
-
-@keyframes inactive-look {
-	0%,
-	14% {
-		translate: 0 0;
-	}
-	18%,
-	27% {
-		translate: -7% 1%;
-	}
-	31%,
-	42% {
-		translate: 0 0;
-	}
-	46%,
-	55% {
-		translate: 7% -2%;
-	}
-	59%,
-	70% {
-		translate: 0 0;
-	}
-	74%,
-	82% {
-		translate: -3% 3%;
-	}
-	86%,
-	100% {
-		translate: 0 0;
 	}
 }
 
@@ -430,47 +425,20 @@ pre {
 	0%,
 	88%,
 	100% {
-		transform: scaleY(1.05);
+		transform: scale(var(--eye-scale-x), calc(var(--eye-scale-y) * 1.05));
 	}
 	92% {
-		transform: scaleY(0.12);
+		transform: scale(var(--eye-scale-x), calc(var(--eye-scale-y) * 0.12));
 	}
 }
 
-@keyframes attentive-scan {
+@keyframes thinking-pulse {
 	0%,
 	100% {
-		translate: -2% 0;
+		opacity: 0.92;
 	}
 	50% {
-		translate: 2% 0;
-	}
-}
-
-@keyframes hearing-pulse {
-	from {
-		transform: scale(1.02);
-		box-shadow: 0 0 35px #6ff;
-	}
-	to {
-		transform: scale(1.18);
-		box-shadow: 0 0 80px #dff;
-	}
-}
-
-@keyframes thinking-gaze {
-	0%,
-	100% {
-		transform: translate(-10%, -12%) scale(0.92);
-	}
-	38% {
-		transform: translate(-12%, -8%) scale(0.9);
-	}
-	62% {
-		transform: translate(-6%, -14%) scale(0.94);
-	}
-	82% {
-		transform: translate(-10%, -10%) scale(0.92);
+		opacity: 1;
 	}
 }
 
@@ -486,21 +454,27 @@ pre {
 	}
 }
 
+@keyframes speaking-warmup {
+	from {
+		box-shadow:
+			0 0 28px var(--eye-glow),
+			0 0 72px var(--eye-glow-soft),
+			inset 0 -14px 24px var(--eye-inset);
+	}
+	to {
+		box-shadow:
+			0 0 42px var(--eye-glow),
+			0 0 96px var(--eye-glow-soft),
+			inset 0 -14px 24px var(--eye-inset);
+	}
+}
+
 @keyframes tool-lean {
 	from {
 		transform: rotate(-2.5deg) translateX(-1.5%);
 	}
 	to {
 		transform: rotate(2.5deg) translateX(1.5%);
-	}
-}
-
-@keyframes tool-squint {
-	from {
-		transform: scaleY(0.65) scaleX(1.1);
-	}
-	to {
-		transform: scaleY(0.95) scaleX(0.95);
 	}
 }
 
