@@ -20,7 +20,17 @@ export const serverConfig = {
 	llamaPort: Number(process.env.LLAMA_PORT ?? 8080),
 	llamaContextWindow: Number(process.env.LLAMA_CONTEXT_WINDOW ?? 131072),
 	llamaModelDir: process.env.LLAMA_MODEL_DIR ?? resolve(homedir(), "models/qwen3.6-35b-a3b"),
-	qwen3TtsWorkerPath: resolve(serverDir, "../../scripts/qwen3-tts-worker.py"),
+	qwen3TtsWorker: process.env.QWEN3_TTS_WORKER ?? "python",
+	qwen3TtsPythonWorkerPath:
+		process.env.QWEN3_TTS_PYTHON_WORKER_PATH ?? resolve(serverDir, "../../scripts/qwen3-tts-worker.py"),
+	qwen3TtsRustWorkerPath:
+		process.env.QWEN3_TTS_RUST_WORKER_PATH ??
+		resolve(
+			serverDir,
+			`../../native/qwen3_tts_rs/target/release/worker${process.platform === "win32" ? ".exe" : ""}`,
+		),
+	qwen3TtsRustModelPath:
+		process.env.QWEN3_TTS_RUST_MODEL_PATH ?? resolve(homedir(), "models/qwen3-tts-12hz-0.6b-base"),
 	version: String(Date.now()),
 	maxContextImages: Number(process.env.MAX_CONTEXT_IMAGES ?? 4),
 	memoryFile: process.env.MEMORY_FILE ?? "data/memories.json",

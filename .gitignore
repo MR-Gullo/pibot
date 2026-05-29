@@ -17,6 +17,8 @@ public/app.js
 # native build artifacts
 native/pibot-stt/build/
 native/pibot-stt/target/
+native/qwen3_tts_rs/build/
+native/qwen3_tts_rs/target/
 models/
 
 # python bytecode

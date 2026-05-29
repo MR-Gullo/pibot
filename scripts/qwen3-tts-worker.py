@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import platform
 import queue
 import re
@@ -222,17 +223,37 @@ def prepare_audio_chunk(item: Any) -> tuple[np.ndarray | None, int | None]:
     return np.asarray(audio, dtype=np.float32).squeeze(), int(sample_rate)
 
 
+def debug_generation_enabled() -> bool:
+    return os.environ.get("QWEN3_TTS_DEBUG_GENERATION", "").lower() in {"1", "true", "yes", "on"}
+
+
 def iter_int16_chunks(items: Iterable[Any], blocksize: int, output_sample_rate: int, label: str) -> Iterator[np.ndarray]:
     started_at = time.perf_counter()
     total_samples = 0
     first_chunk = True
     found_speech = False
     leftover = np.array([], dtype=np.int16)
+    debug_generation = debug_generation_enabled()
+    stream_chunk_index = 0
 
     for item in items:
+        stream_chunk_index += 1
         audio_chunk, sample_rate = prepare_audio_chunk(item)
         if audio_chunk is None or sample_rate is None or audio_chunk.size == 0:
             continue
+
+        if debug_generation:
+            log_json(
+                {
+                    "type": "generation_debug",
+                    "backend": "python_mlx",
+                    "chunk": stream_chunk_index,
+                    "tokenCount": getattr(item, "token_count", None),
+                    "samples": int(audio_chunk.size),
+                    "rms": round(float(np.sqrt(np.mean(np.square(audio_chunk)))), 6),
+                    "final": bool(getattr(item, "is_final_chunk", False)),
+                }
+            )
 
         if first_chunk:
             log_json({"type": "ttfa", "seconds": round(time.perf_counter() - started_at, 3), "label": label})

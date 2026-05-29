@@ -11,8 +11,13 @@ const workerOutputAudioDone = 4;
 const workerOutputError = 5;
 const frameHeaderBytes = 9;
 
+type TtsWorkerKind = "python" | "rust";
+
 export interface TtsServiceDeps {
-	qwen3WorkerPath: string;
+	workerKind: string;
+	pythonWorkerPath: string;
+	rustWorkerPath: string | undefined;
+	rustModelPath: string | undefined;
 	logger: Logger;
 }
 
@@ -58,7 +63,13 @@ function decodeUtf8(payload: Uint8Array): string {
 	return Buffer.from(payload.buffer, payload.byteOffset, payload.byteLength).toString("utf8");
 }
 
+function parseWorkerKind(value: string): TtsWorkerKind {
+	if (value === "python" || value === "rust") return value;
+	throw new Error(`QWEN3_TTS_WORKER must be python or rust, got ${value}`);
+}
+
 export function createTtsService(deps: TtsServiceDeps): TtsService {
+	const workerKind = parseWorkerKind(deps.workerKind);
 	const qwen3ModelName = process.env.QWEN3_TTS_MODEL_NAME ?? "Qwen/Qwen3-TTS-12Hz-1.7B-Base";
 	const qwen3RefAudio = process.env.QWEN3_TTS_REF_AUDIO ?? "data/voices/elevenlabs-pibot-reference-de.wav";
 	const qwen3RefTextFile = process.env.QWEN3_TTS_REF_TEXT_FILE ?? "data/voices/elevenlabs-pibot-reference-de.txt";
@@ -163,17 +174,9 @@ export function createTtsService(deps: TtsServiceDeps): TtsService {
 		}
 	}
 
-	function startWorker(): void {
-		const args = [
-			"run",
-			"--no-project",
-			"--with",
-			"speech-to-speech==0.2.9",
-			"python",
-			deps.qwen3WorkerPath,
+	function workerCommand(): { command: string; args: string[]; label: string } {
+		const commonArgs = [
 			"--serve",
-			"--model-name",
-			qwen3ModelName,
 			"--ref-audio",
 			qwen3RefAudio,
 			"--ref-text-file",
@@ -187,9 +190,32 @@ export function createTtsService(deps: TtsServiceDeps): TtsService {
 			"--top-k",
 			String(qwen3TopK),
 		];
-		if (qwen3Seed.trim()) args.push("--seed", qwen3Seed);
-		logger.log(`starting Qwen3 TTS worker: uv ${args.join(" ")}`);
-		const child = spawn("uv", args, { stdio: ["pipe", "pipe", "pipe"] });
+		if (qwen3Seed.trim()) commonArgs.push("--seed", qwen3Seed);
+		if (workerKind === "python") {
+			const args = [
+				"run",
+				"--no-project",
+				"--with",
+				"speech-to-speech==0.2.9",
+				"python",
+				deps.pythonWorkerPath,
+				...commonArgs,
+				"--model-name",
+				qwen3ModelName,
+			];
+			return { command: "uv", args, label: `uv ${args.join(" ")}` };
+		}
+		if (!deps.rustWorkerPath) throw new Error("QWEN3_TTS_RUST_WORKER_PATH is required when QWEN3_TTS_WORKER=rust");
+		const args = [...commonArgs];
+		const rustModelPath = deps.rustModelPath ?? process.env.QWEN3_TTS_MODEL_NAME;
+		if (rustModelPath) args.push("--model-name", rustModelPath);
+		return { command: deps.rustWorkerPath, args, label: `${deps.rustWorkerPath} ${args.join(" ")}` };
+	}
+
+	function startWorker(): void {
+		const { command, args, label } = workerCommand();
+		logger.log(`starting Qwen3 TTS ${workerKind} worker: ${label}`);
+		const child = spawn(command, args, { stdio: ["pipe", "pipe", "pipe"] });
 		worker = child;
 		child.stdout?.on("data", (chunk: Buffer) => handleStdoutData(chunk));
 		child.stderr?.on("data", (chunk: Buffer) => {

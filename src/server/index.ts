@@ -44,7 +44,13 @@ const llama = await createLlamaService({
 	contextWindow: serverConfig.llamaContextWindow,
 	logger,
 });
-const tts = createTtsService({ qwen3WorkerPath: serverConfig.qwen3TtsWorkerPath, logger });
+const tts = createTtsService({
+	workerKind: serverConfig.qwen3TtsWorker,
+	pythonWorkerPath: serverConfig.qwen3TtsPythonWorkerPath,
+	rustWorkerPath: serverConfig.qwen3TtsRustWorkerPath,
+	rustModelPath: serverConfig.qwen3TtsRustModelPath,
+	logger,
+});
 const stt = createSttService({
 	workerBinaryPath: serverConfig.sttWorkerBinaryPath,
 	modelDir: serverConfig.parakeetTdtModelDir,
