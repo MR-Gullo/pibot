@@ -1,4 +1,8 @@
 import { type ChildProcess, spawn } from "node:child_process";
+import { once } from "node:events";
+import { createWriteStream, existsSync } from "node:fs";
+import { mkdir, rename, stat, unlink } from "node:fs/promises";
+import { dirname, join } from "node:path";
 import type { Logger } from "./logger.js";
 
 const workerInputSpeak = 1;
@@ -10,11 +14,21 @@ const workerOutputAudioChunk = 3;
 const workerOutputAudioDone = 4;
 const workerOutputError = 5;
 const frameHeaderBytes = 9;
+const defaultRustTtsModelRepo = "Qwen/Qwen3-TTS-12Hz-0.6B-Base";
+const ignoredHuggingFaceFiles = new Set([".gitattributes", "README.md"]);
+const requiredRustTtsModelFiles = [
+	"config.json",
+	"model.safetensors",
+	"vocab.json",
+	"merges.txt",
+	"speech_tokenizer/model.safetensors",
+] as const;
 
 type TtsWorkerKind = "python" | "rust";
 
 export interface TtsServiceDeps {
 	workerKind: string;
+	pythonCommand: string;
 	pythonWorkerPath: string;
 	rustWorkerPath: string | undefined;
 	rustModelPath: string | undefined;
@@ -42,6 +56,12 @@ interface QueuedRequest {
 	text: string;
 }
 
+interface DownloadFile {
+	url: string;
+	path: string;
+	label: string;
+}
+
 function envNumber(name: string, fallback: number): number {
 	const value = process.env[name];
 	if (value === undefined || value.trim() === "") return fallback;
@@ -66,6 +86,97 @@ function decodeUtf8(payload: Uint8Array): string {
 function parseWorkerKind(value: string): TtsWorkerKind {
 	if (value === "python" || value === "rust") return value;
 	throw new Error(`QWEN3_TTS_WORKER must be python or rust, got ${value}`);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null;
+}
+
+function huggingFaceFileUrl(repo: string, file: string): string {
+	return `https://huggingface.co/${repo}/resolve/main/${file.split("/").map(encodeURIComponent).join("/")}`;
+}
+
+async function hasUsableFile(path: string): Promise<boolean> {
+	try {
+		return (await stat(path)).size > 0;
+	} catch {
+		return false;
+	}
+}
+
+async function hasRequiredRustTtsModelFiles(modelDir: string): Promise<boolean> {
+	for (const file of requiredRustTtsModelFiles) {
+		if (!(await hasUsableFile(join(modelDir, file)))) return false;
+	}
+	return true;
+}
+
+async function listHuggingFaceFiles(repo: string): Promise<string[]> {
+	const response = await fetch(`https://huggingface.co/api/models/${repo}`);
+	if (!response.ok) throw new Error(`failed to list ${repo}: HTTP ${response.status}`);
+	const value: unknown = await response.json();
+	if (!isRecord(value) || !Array.isArray(value.siblings))
+		throw new Error(`invalid Hugging Face model API response for ${repo}`);
+	const files: string[] = [];
+	for (const sibling of value.siblings) {
+		if (!isRecord(sibling) || typeof sibling.rfilename !== "string") continue;
+		files.push(sibling.rfilename);
+	}
+	return files;
+}
+
+async function downloadFile(file: DownloadFile, logger: Logger): Promise<void> {
+	const tmpPath = `${file.path}.tmp-${process.pid}`;
+	await unlink(tmpPath).catch(() => undefined);
+	await mkdir(dirname(file.path), { recursive: true });
+	logger.log(`downloading ${file.label}`);
+	const response = await fetch(file.url);
+	if (!response.ok || !response.body) throw new Error(`failed to download ${file.label}: HTTP ${response.status}`);
+	const total = Number(response.headers.get("content-length") ?? "0");
+	const reader = response.body.getReader();
+	const output = createWriteStream(tmpPath, { flags: "wx" });
+	let received = 0;
+	let lastLog = Date.now();
+	try {
+		while (true) {
+			const chunk = await reader.read();
+			if (chunk.done) break;
+			received += chunk.value.byteLength;
+			if (!output.write(chunk.value)) await once(output, "drain");
+			if (Date.now() - lastLog > 5000) {
+				lastLog = Date.now();
+				const suffix = total > 0 ? ` / ${(total / 1024 / 1024).toFixed(1)} MiB` : "";
+				logger.log(`downloading ${file.label}: ${(received / 1024 / 1024).toFixed(1)} MiB${suffix}`);
+			}
+		}
+		output.end();
+		await once(output, "finish");
+		await rename(tmpPath, file.path);
+		const suffix = total > 0 ? ` / ${(total / 1024 / 1024).toFixed(1)} MiB` : "";
+		logger.log(`downloaded ${file.label}: ${(received / 1024 / 1024).toFixed(1)} MiB${suffix}`);
+	} catch (error) {
+		output.destroy();
+		await unlink(tmpPath).catch(() => undefined);
+		throw error;
+	}
+}
+
+async function ensureRustTtsModel(modelDir: string, logger: Logger): Promise<void> {
+	await mkdir(modelDir, { recursive: true });
+	if (await hasRequiredRustTtsModelFiles(modelDir)) return;
+
+	const repo = process.env.QWEN3_TTS_RUST_MODEL_REPO ?? defaultRustTtsModelRepo;
+	logger.log(`provisioning Rust Qwen3 TTS model ${repo} into ${modelDir}`);
+	const files = (await listHuggingFaceFiles(repo)).filter((file) => !ignoredHuggingFaceFiles.has(file));
+	for (const file of files) {
+		const path = join(modelDir, file);
+		if (await hasUsableFile(path)) continue;
+		await downloadFile({ url: huggingFaceFileUrl(repo, file), path, label: `Qwen3 TTS model file ${file}` }, logger);
+	}
+
+	if (!(await hasRequiredRustTtsModelFiles(modelDir))) {
+		throw new Error(`Rust Qwen3 TTS model is incomplete after download: ${modelDir}`);
+	}
 }
 
 export function createTtsService(deps: TtsServiceDeps): TtsService {
@@ -192,27 +303,34 @@ export function createTtsService(deps: TtsServiceDeps): TtsService {
 		];
 		if (qwen3Seed.trim()) commonArgs.push("--seed", qwen3Seed);
 		if (workerKind === "python") {
-			const args = [
-				"run",
-				"--no-project",
-				"--with",
-				"speech-to-speech==0.2.9",
-				"python",
-				deps.pythonWorkerPath,
-				...commonArgs,
-				"--model-name",
-				qwen3ModelName,
-			];
-			return { command: "uv", args, label: `uv ${args.join(" ")}` };
+			const directArgs = [deps.pythonWorkerPath, ...commonArgs, "--model-name", qwen3ModelName];
+			if (deps.pythonCommand === "uv") {
+				const args = ["run", "--no-project", "--with", "speech-to-speech==0.2.9", "python", ...directArgs];
+				return { command: deps.pythonCommand, args, label: `${deps.pythonCommand} ${args.join(" ")}` };
+			}
+			return {
+				command: deps.pythonCommand,
+				args: directArgs,
+				label: `${deps.pythonCommand} ${directArgs.join(" ")}`,
+			};
 		}
 		if (!deps.rustWorkerPath) throw new Error("QWEN3_TTS_RUST_WORKER_PATH is required when QWEN3_TTS_WORKER=rust");
+		if (!existsSync(deps.rustWorkerPath)) {
+			throw new Error(`Rust Qwen3 TTS worker binary missing: ${deps.rustWorkerPath}. Run npm run build:tts-rust.`);
+		}
 		const args = [...commonArgs];
 		const rustModelPath = deps.rustModelPath ?? process.env.QWEN3_TTS_MODEL_NAME;
-		if (rustModelPath) args.push("--model-name", rustModelPath);
+		if (!rustModelPath) throw new Error("QWEN3_TTS_RUST_MODEL_PATH is required when QWEN3_TTS_WORKER=rust");
+		args.push("--model-name", rustModelPath);
 		return { command: deps.rustWorkerPath, args, label: `${deps.rustWorkerPath} ${args.join(" ")}` };
 	}
 
-	function startWorker(): void {
+	async function startWorkerAsync(): Promise<void> {
+		if (workerKind === "rust") {
+			const rustModelPath = deps.rustModelPath ?? process.env.QWEN3_TTS_MODEL_NAME;
+			if (!rustModelPath) throw new Error("QWEN3_TTS_RUST_MODEL_PATH is required when QWEN3_TTS_WORKER=rust");
+			await ensureRustTtsModel(rustModelPath, logger);
+		}
 		const { command, args, label } = workerCommand();
 		logger.log(`starting Qwen3 TTS ${workerKind} worker: ${label}`);
 		const child = spawn(command, args, { stdio: ["pipe", "pipe", "pipe"] });
@@ -233,6 +351,16 @@ export function createTtsService(deps: TtsServiceDeps): TtsService {
 			callbacks?.onError(error.message);
 			callbacks = undefined;
 			if (code !== 0) logger.log(error.message);
+		});
+	}
+
+	function startWorker(): void {
+		void startWorkerAsync().catch((error) => {
+			const normalized = error instanceof Error ? error : new Error(String(error));
+			logger.log(normalized.message);
+			rejectReady?.(normalized);
+			callbacks?.onError(normalized.message);
+			callbacks = undefined;
 		});
 	}
 

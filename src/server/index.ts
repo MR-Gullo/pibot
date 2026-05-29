@@ -21,6 +21,8 @@ let stoppedUtteranceIndex: number | undefined;
 let activeChunker: SentenceChunker | undefined;
 let activeAssistantText = "";
 let ttsStartedForTurn = false;
+let speechPlaybackFinished: Promise<void> | undefined;
+let resolveSpeechPlaybackFinished: (() => void) | undefined;
 
 const logger = createLogger((entry) => {
 	console.log(formatEntry(entry, true));
@@ -46,6 +48,7 @@ const llama = await createLlamaService({
 });
 const tts = createTtsService({
 	workerKind: serverConfig.qwen3TtsWorker,
+	pythonCommand: serverConfig.qwen3TtsPythonCommand,
 	pythonWorkerPath: serverConfig.qwen3TtsPythonWorkerPath,
 	rustWorkerPath: serverConfig.qwen3TtsRustWorkerPath,
 	rustModelPath: serverConfig.qwen3TtsRustModelPath,
@@ -64,6 +67,7 @@ const harness = await createRobotHarness({
 	maxContextImages: serverConfig.maxContextImages,
 	robot,
 	onEvent: handleHarnessEvent,
+	beforeTool: waitForSpeechBeforeTool,
 });
 const http = createHttpServer({
 	publicDir: serverConfig.publicDir,
@@ -140,7 +144,7 @@ function submitPrompt(text: string): void {
 function handleSttEvent(event: SttEvent): void {
 	if (event.type === "ready") {
 		sttLogger.log(
-			`Parakeet ready sampleRate=${event.sampleRate} vadChunkMs=${event.vadChunkMs} threshold=${event.vadThreshold} energyGate=${event.energyGate ?? "off"} minSilenceMs=${event.minSilenceMs} prerollMs=${event.prerollMs} interimIntervalMs=${event.interimIntervalMs ?? "off"}`,
+			`Parakeet ready sampleRate=${event.sampleRate} vadChunkMs=${event.vadChunkMs} threshold=${event.vadThreshold} energyGate=${event.energyGate ?? "off"} minSilenceMs=${event.minSilenceMs} prerollMs=${event.prerollMs} interimIntervalMs=${event.interimIntervalMs ?? "off"} interimMinAudioMs=${event.interimMinAudioMs ?? "off"} interimWindowMs=${event.interimWindowMs ?? "off"}`,
 		);
 		setRobotState({ phase: "listening" });
 	}
@@ -158,7 +162,7 @@ function handleSttEvent(event: SttEvent): void {
 	}
 	if (event.type === "interim") {
 		sttLogger.log(
-			`interim #${event.index} audioMs=${event.audioMs} decodeMs=${event.decodeMs} text=${JSON.stringify(event.text)}`,
+			`interim #${event.index} audioMs=${event.audioMs} windowMs=${event.windowMs ?? "full"} decodeMs=${event.decodeMs} text=${JSON.stringify(event.text)}`,
 		);
 		if (event.text && looksLikeStopCommand(event.text) && stoppedUtteranceIndex !== event.index) {
 			stoppedUtteranceIndex = event.index;
@@ -185,6 +189,9 @@ function handleSttEvent(event: SttEvent): void {
 }
 
 function startAssistantSpeechStream(): void {
+	speechPlaybackFinished = new Promise((resolve) => {
+		resolveSpeechPlaybackFinished = resolve;
+	});
 	speechActive = true;
 	ttsStartedForTurn = true;
 	setRobotState({ phase: "speaking", assistantText: activeAssistantText });
@@ -213,9 +220,23 @@ function finishSpeechPlayback(reason: string): void {
 	speechActive = false;
 	ttsStartedForTurn = false;
 	activeChunker = undefined;
+	resolveSpeechPlaybackFinished?.();
+	resolveSpeechPlaybackFinished = undefined;
+	speechPlaybackFinished = undefined;
 	lastSpeechEndedAt = Date.now();
 	ttsLogger.log(`speech finished: ${reason}`);
 	setRobotState({ phase: "listening" });
+}
+
+async function waitForSpeechBeforeTool(name: string): Promise<void> {
+	const pendingSpeech = speechPlaybackFinished;
+	if (!pendingSpeech) return;
+	ttsLogger.log(`waiting for speech before tool ${name}`);
+	await pendingSpeech;
+}
+
+function sanitizeTextForTts(text: string): string {
+	return text.replace(/\p{Emoji_Presentation}|\p{Extended_Pictographic}|\uFE0F/gu, " ").replace(/\s+/g, " ");
 }
 
 function handleAssistantTextDelta(text: string): void {
@@ -223,7 +244,7 @@ function handleAssistantTextDelta(text: string): void {
 	setRobotState({ phase: ttsStartedForTurn ? "speaking" : "thinking", assistantText: activeAssistantText });
 	const chunker = activeChunker;
 	if (!chunker) return;
-	for (const chunk of chunker.push(text)) {
+	for (const chunk of chunker.push(sanitizeTextForTts(text))) {
 		if (!ttsStartedForTurn) startAssistantSpeechStream();
 		ttsLogger.log(`queue text chunk chars=${chunk.length}`);
 		tts.pushText(chunk);

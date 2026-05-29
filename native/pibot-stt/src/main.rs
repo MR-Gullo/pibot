@@ -21,6 +21,7 @@ struct Config {
     min_utterance_ms: usize,
     interim_interval_ms: usize,
     interim_min_audio_ms: usize,
+    interim_window_ms: usize,
     energy_gate: f32,
 }
 
@@ -52,8 +53,9 @@ fn config() -> Result<Config, String> {
         speech_pad_ms: env_usize("PARAKEET_SPEECH_PAD_MS", 250),
         preroll_ms: env_usize("PARAKEET_PREROLL_MS", 1800),
         min_utterance_ms: env_usize("PARAKEET_MIN_UTTERANCE_MS", 450),
-        interim_interval_ms: env_usize("PARAKEET_INTERIM_INTERVAL_MS", 0),
-        interim_min_audio_ms: env_usize("PARAKEET_INTERIM_MIN_AUDIO_MS", 600),
+        interim_interval_ms: env_usize("PARAKEET_INTERIM_INTERVAL_MS", 250),
+        interim_min_audio_ms: env_usize("PARAKEET_INTERIM_MIN_AUDIO_MS", 300),
+        interim_window_ms: env_usize("PARAKEET_INTERIM_WINDOW_MS", 4000),
         energy_gate: env_f32("PARAKEET_ENERGY_GATE", 0.002),
     })
 }
@@ -160,12 +162,15 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         "speechPadMs": cfg.speech_pad_ms,
         "prerollMs": cfg.preroll_ms,
         "interimIntervalMs": cfg.interim_interval_ms,
+        "interimMinAudioMs": cfg.interim_min_audio_ms,
+        "interimWindowMs": cfg.interim_window_ms,
         "energyGate": cfg.energy_gate,
     }));
 
     let preroll_chunks = (cfg.preroll_ms / VAD_CHUNK_MS).max(1);
     let min_utterance_frames = (SAMPLE_RATE * cfg.min_utterance_ms / 1000).max(1);
     let interim_min_frames = (SAMPLE_RATE * cfg.interim_min_audio_ms / 1000).max(1);
+    let interim_window_frames = (SAMPLE_RATE * cfg.interim_window_ms / 1000).max(1);
 
     let mut stdin = io::stdin().lock();
     let mut pending = Vec::<f32>::new();
@@ -229,7 +234,23 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     && audio_ms.saturating_sub(last_interim_ms) >= cfg.interim_interval_ms
                 {
                     last_interim_ms = audio_ms;
-                    let audio = concat_chunks(&utterance_chunks);
+                    let mut remaining_frames = interim_window_frames.min(audio_frames);
+                    let mut slices = Vec::<&[f32]>::new();
+                    for chunk in utterance_chunks.iter().rev() {
+                        let take = remaining_frames.min(chunk.len());
+                        if take > 0 {
+                            slices.push(&chunk[chunk.len() - take..]);
+                        }
+                        remaining_frames -= take;
+                        if remaining_frames == 0 {
+                            break;
+                        }
+                    }
+                    let mut audio = Vec::<f32>::with_capacity(interim_window_frames.min(audio_frames));
+                    for slice in slices.iter().rev() {
+                        audio.extend_from_slice(slice);
+                    }
+                    let window_ms = audio.len() * 1000 / SAMPLE_RATE;
                     let decode_started = Instant::now();
                     match transcribe(&mut model, &audio) {
                         Ok(text) => emit(json!({
@@ -237,6 +258,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                             "index": utterance_index,
                             "text": text,
                             "audioMs": audio_ms,
+                            "windowMs": window_ms,
                             "decodeMs": decode_started.elapsed().as_millis(),
                         })),
                         Err(error) => {

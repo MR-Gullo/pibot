@@ -45,6 +45,15 @@ function moveFaceToRobotMode(): void {
 moveFaceToSetup();
 const wsProtocol = location.protocol === "https:" ? "wss" : "ws";
 const targetSttSampleRate = 16000;
+type ExtendedMicAudioConstraints = MediaTrackConstraints & { latency?: ConstrainDouble };
+const micAudioConstraints: ExtendedMicAudioConstraints = {
+	echoCancellation: { ideal: true },
+	noiseSuppression: { ideal: true },
+	autoGainControl: { ideal: true },
+	channelCount: { ideal: 1 },
+	sampleRate: { ideal: 48000 },
+	latency: { ideal: 0.02 },
+};
 const clientLogger = new BrowserClientLogger();
 
 let robotServer: RobotServer;
@@ -197,13 +206,15 @@ async function startRecognition(): Promise<void> {
 	recognitionWanted = true;
 	try {
 		micStream = await navigator.mediaDevices.getUserMedia({
-			audio: {
-				echoCancellation: true,
-				noiseSuppression: true,
-				autoGainControl: true,
-			},
+			audio: micAudioConstraints,
 			video: false,
 		});
+		const [audioTrack] = micStream.getAudioTracks();
+		await audioTrack?.applyConstraints(micAudioConstraints).catch((error: unknown) => {
+			log(`mic constraint apply failed: ${error instanceof Error ? error.message : String(error)}`, "stt");
+		});
+		const settings = audioTrack?.getSettings();
+		if (settings) log(`mic settings: ${JSON.stringify(settings)}`, "stt");
 		micAudioContext = new AudioContext();
 		micSource = micAudioContext.createMediaStreamSource(micStream);
 		micProcessor = micAudioContext.createScriptProcessor(4096, 1, 1);

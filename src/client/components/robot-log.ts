@@ -9,7 +9,22 @@ function tagColor(tag: string): string {
 }
 
 export class RobotLogElement extends HTMLElement {
+	private autoScroll = true;
+
+	connectedCallback(): void {
+		this.addEventListener("scroll", this.handleScroll);
+	}
+
+	disconnectedCallback(): void {
+		this.removeEventListener("scroll", this.handleScroll);
+	}
+
+	private readonly handleScroll = (): void => {
+		this.autoScroll = this.scrollTop + this.clientHeight >= this.scrollHeight - 4;
+	};
+
 	appendLine(origin: LogOrigin, tags: string[], message: string): void {
+		const shouldScroll = this.autoScroll || this.scrollTop + this.clientHeight >= this.scrollHeight - 4;
 		const line = document.createElement("div");
 		const displayTags = [origin, ...tags.filter((tag, index) => index !== 0 || tag !== origin)];
 		line.append(`${new Date().toLocaleTimeString()} `);
@@ -22,7 +37,7 @@ export class RobotLogElement extends HTMLElement {
 		line.append(` ${message}`);
 		line.className = displayTags.join(" ");
 		this.append(line);
-		this.scrollTop = this.scrollHeight;
+		if (shouldScroll) this.scrollTop = this.scrollHeight;
 	}
 }
 

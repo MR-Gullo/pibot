@@ -21,6 +21,7 @@ export const serverConfig = {
 	llamaContextWindow: Number(process.env.LLAMA_CONTEXT_WINDOW ?? 131072),
 	llamaModelDir: process.env.LLAMA_MODEL_DIR ?? resolve(homedir(), "models/qwen3.6-35b-a3b"),
 	qwen3TtsWorker: process.env.QWEN3_TTS_WORKER ?? "python",
+	qwen3TtsPythonCommand: process.env.QWEN3_TTS_PYTHON_COMMAND ?? "uv",
 	qwen3TtsPythonWorkerPath:
 		process.env.QWEN3_TTS_PYTHON_WORKER_PATH ?? resolve(serverDir, "../../scripts/qwen3-tts-worker.py"),
 	qwen3TtsRustWorkerPath:

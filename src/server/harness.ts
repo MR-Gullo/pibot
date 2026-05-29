@@ -69,10 +69,12 @@ async function buildSystemPrompt(memoryStore: MemoryStore): Promise<string> {
 Persistente Erinnerungen:
 ${formatMemories(await memoryStore.list())}
 
-Memory-Tool-Aufrufschema:
-- Alle Erinnerungen lesen: memory({"action":"read"})
-- Neue Erinnerung speichern: memory({"action":"append","text":"Pipi ist der Name des Roboters"})
-- Erinnerung löschen: memory({"action":"remove","index":0})`;
+Memory-Werkzeug:
+- Nutze das Memory-Werkzeug über die Tool-Calling-Schnittstelle, nicht als Text in deiner Antwort.
+- Schreibe niemals Tool-Aufrufe wie memory(...) oder JSON für Werkzeuge in den normalen Antworttext.
+- Wenn du Erinnerungen lesen sollst, rufe memory mit action read auf oder ohne Argumente.
+- Wenn du etwas speichern sollst, rufe memory mit action append und text auf. Behaupte erst danach, dass es gespeichert wurde.
+- Wenn du eine Erinnerung löschen sollst, rufe memory mit action remove und index auf.`;
 }
 
 function extractAssistantText(message: AssistantMessage): string {
@@ -103,6 +105,7 @@ export async function createRobotHarness(deps: {
 	maxContextImages: number;
 	robot: RobotClient;
 	onEvent: (event: RobotHarnessEvent) => void | Promise<void>;
+	beforeTool: (name: string, args: unknown) => void | Promise<void>;
 }): Promise<RobotHarness> {
 	const sessionRepo = new InMemorySessionRepo();
 	const tools = createRobotTools(deps.robot, deps.memoryStore);
@@ -132,6 +135,10 @@ export async function createRobotHarness(deps: {
 			},
 			tools,
 			systemPrompt: async () => buildSystemPrompt(deps.memoryStore),
+		});
+		newHarness.on("tool_call", async (event) => {
+			await deps.beforeTool(event.toolName, event.input);
+			return undefined;
 		});
 		newHarness.on("context", async (event) => {
 			const context = pruneImagesForContext(event.messages, deps.maxContextImages);

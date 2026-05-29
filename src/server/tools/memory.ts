@@ -1,17 +1,16 @@
 import type { AgentTool } from "@earendil-works/pi-agent-core";
-import { Type } from "@earendil-works/pi-ai";
+import { StringEnum, Type } from "@earendil-works/pi-ai";
 
-const memoryParameters = Type.Union([
-	Type.Object({ action: Type.Literal("read") }),
-	Type.Object({
-		action: Type.Literal("append"),
-		text: Type.String({ description: "The exact memory text to store." }),
-	}),
-	Type.Object({
-		action: Type.Literal("remove"),
-		index: Type.Number({ description: "Zero-based memory index to remove." }),
-	}),
-]);
+const memoryParameters = Type.Object({
+	action: Type.Optional(
+		StringEnum(["read", "append", "remove"], {
+			description: "Memory action. Defaults to read if omitted.",
+			default: "read",
+		}),
+	),
+	text: Type.Optional(Type.String({ description: "Exact memory text to store when action is append." })),
+	index: Type.Optional(Type.Number({ description: "Zero-based memory index to remove when action is remove." })),
+});
 
 interface MemoryToolDetails {
 	memories: string[];
@@ -33,7 +32,8 @@ export function createMemoryTool(store: MemoryStore): AgentTool<typeof memoryPar
 		parameters: memoryParameters,
 		executionMode: "sequential",
 		execute: async (_id, params) => {
-			if (params.action === "read") {
+			const action = params.action ?? "read";
+			if (action === "read") {
 				const memories = await store.list();
 				return {
 					content: [
@@ -48,8 +48,8 @@ export function createMemoryTool(store: MemoryStore): AgentTool<typeof memoryPar
 					details: { memories },
 				};
 			}
-			if (params.action === "append") {
-				const text = params.text.trim();
+			if (action === "append") {
+				const text = params.text?.trim() ?? "";
 				if (!text) throw new Error("Memory text must not be empty");
 				const memories = await store.append(text);
 				return {
@@ -57,6 +57,7 @@ export function createMemoryTool(store: MemoryStore): AgentTool<typeof memoryPar
 					details: { memories },
 				};
 			}
+			if (params.index === undefined) throw new Error("Memory index is required for remove");
 			const { memories, removed } = await store.remove(params.index);
 			return {
 				content: [{ type: "text", text: `Removed memory ${params.index}: ${removed}` }],

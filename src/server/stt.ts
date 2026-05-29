@@ -26,12 +26,14 @@ export type SttEvent =
 			minSilenceMs: number;
 			prerollMs: number;
 			interimIntervalMs?: number;
+			interimMinAudioMs?: number;
+			interimWindowMs?: number;
 			energyGate?: number;
 	  }
 	| { type: "speech_start"; index: number }
 	| { type: "speech_end"; index: number; duration: number }
 	| { type: "speech_drop"; index: number; duration: number; reason: string }
-	| { type: "interim"; index: number; text: string; audioMs: number; decodeMs: number }
+	| { type: "interim"; index: number; text: string; audioMs: number; windowMs?: number; decodeMs: number }
 	| { type: "final"; index: number; text: string; decodeMs: number }
 	| { type: "error"; message: string };
 
@@ -48,12 +50,14 @@ type SttWorkerMsg =
 			speechPadMs: number;
 			prerollMs: number;
 			interimIntervalMs?: number;
+			interimMinAudioMs?: number;
+			interimWindowMs?: number;
 			energyGate?: number;
 	  }
 	| { type: "speech_start"; index: number; time: number }
 	| { type: "speech_end"; index: number; duration: number }
 	| { type: "speech_drop"; index: number; duration: number; reason: string }
-	| { type: "interim"; index: number; text: string; audioMs: number; decodeMs: number }
+	| { type: "interim"; index: number; text: string; audioMs: number; windowMs?: number; decodeMs: number }
 	| { type: "final"; index: number; text: string; duration: number; decodeMs: number }
 	| { type: "error"; message: string };
 
@@ -190,6 +194,8 @@ export function createSttService(deps: SttServiceDeps): SttService {
 				minSilenceMs: message.minSilenceMs,
 				prerollMs: message.prerollMs,
 				interimIntervalMs: message.interimIntervalMs,
+				interimMinAudioMs: message.interimMinAudioMs,
+				interimWindowMs: message.interimWindowMs,
 				energyGate: message.energyGate,
 			});
 			return;
@@ -212,6 +218,7 @@ export function createSttService(deps: SttServiceDeps): SttService {
 				index: message.index,
 				text: message.text.trim(),
 				audioMs: message.audioMs,
+				windowMs: message.windowMs,
 				decodeMs: message.decodeMs,
 			});
 			return;

@@ -5,6 +5,9 @@
 	"type": "module",
 	"scripts": {
 		"dev": "node scripts/dev.mjs",
+		"bench:llm": "node scripts/benchmark-llm-concurrency.mjs",
+		"bench:stt": "node scripts/benchmark-stt.mjs",
+		"bench:tts": "node scripts/benchmark-tts-concurrency.mjs",
 		"compile:client": "esbuild src/client/index.ts --bundle --format=esm --target=es2022 --outfile=public/app.js",
 		"submodules": "git submodule update --init --recursive",
 		"build:stt-rust": "cargo build --release --manifest-path native/pibot-stt/Cargo.toml",
