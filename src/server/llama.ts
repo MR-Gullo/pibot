@@ -7,19 +7,65 @@ import type { Logger } from "./logger.js";
 
 const LLAMA_CPP_RELEASE = "b9370";
 const LLAMA_CPP_BASE_URL = `https://github.com/ggml-org/llama.cpp/releases/download/${LLAMA_CPP_RELEASE}`;
-const QWEN_GGUF_BASE_URL = "https://huggingface.co/unsloth/Qwen3.6-35B-A3B-GGUF/resolve/main";
-const QWEN_MODEL_FILE = "Qwen3.6-35B-A3B-UD-Q5_K_M.gguf";
-const QWEN_MMPROJ_FILE = "mmproj-F16.gguf";
+
+export interface LocalLlmConfig {
+	name: string;
+	modelFile: string;
+	mmprojFile: string;
+	downloadBaseUrl: string;
+	defaultModelDirName: string;
+	contextWindow: number;
+	maxTokens: number;
+	input: ("text" | "image")[];
+	chatTemplateKwargs?: string;
+}
+
+export const localLlmConfigs = {
+	qwen: {
+		name: "Qwen3.6 35B A3B Q5 llama.cpp Local",
+		modelFile: "Qwen3.6-35B-A3B-UD-Q5_K_M.gguf",
+		mmprojFile: "mmproj-F16.gguf",
+		downloadBaseUrl: "https://huggingface.co/unsloth/Qwen3.6-35B-A3B-GGUF/resolve/main",
+		defaultModelDirName: "qwen3.6-35b-a3b",
+		contextWindow: 131072,
+		maxTokens: 16384,
+		input: ["text", "image"],
+		chatTemplateKwargs: '{"enable_thinking":false}',
+	},
+	gemma: {
+		name: "Gemma 4 E2B it Q8 llama.cpp Local",
+		modelFile: "gemma-4-E2B-it-Q8_0.gguf",
+		mmprojFile: "mmproj-gemma-4-E2B-it-Q8_0.gguf",
+		downloadBaseUrl: "https://huggingface.co/ggml-org/gemma-4-E2B-it-GGUF/resolve/main",
+		defaultModelDirName: "gemma-4-e2b-it",
+		contextWindow: 131072,
+		maxTokens: 16384,
+		input: ["text", "image"],
+		chatTemplateKwargs: '{"enable_thinking":false}',
+	},
+} satisfies Record<string, LocalLlmConfig>;
+
+export type LocalLlmId = keyof typeof localLlmConfigs;
+
+export function parseLocalLlmId(value: string | undefined): LocalLlmId {
+	const normalized = value?.toLowerCase();
+	if (!normalized || normalized === "qwen") return "qwen";
+	if (normalized === "gemma") return "gemma";
+	throw new Error(`Unknown LOCAL_LLM: ${value}. Expected qwen or gemma.`);
+}
 
 export interface LlamaServiceDeps {
 	cacheDir: string;
 	modelDir: string;
 	modelFile: string;
 	mmprojFile: string;
+	modelDownloadBaseUrl: string;
+	modelLabel: string;
 	baseUrl: string;
 	host: string;
 	port: number;
 	contextWindow: number;
+	chatTemplateKwargs?: string;
 	logger: Logger;
 }
 
@@ -121,12 +167,19 @@ async function ensureLlamaBinary(cacheDir: string, logger: Logger): Promise<stri
 	return binaryPath;
 }
 
-async function ensureQwenModel(modelDir: string, modelFile: string, mmprojFile: string, logger: Logger): Promise<void> {
+async function ensureLlamaModel(
+	modelDir: string,
+	modelFile: string,
+	mmprojFile: string,
+	modelDownloadBaseUrl: string,
+	modelLabel: string,
+	logger: Logger,
+): Promise<void> {
 	await mkdir(modelDir, { recursive: true });
 	for (const file of [modelFile, mmprojFile]) {
 		const path = join(modelDir, file);
 		if (await hasUsableFile(path)) continue;
-		await downloadFile({ url: `${QWEN_GGUF_BASE_URL}/${file}`, path, label: `Qwen model file ${file}` }, logger);
+		await downloadFile({ url: `${modelDownloadBaseUrl}/${file}`, path, label: `${modelLabel} file ${file}` }, logger);
 	}
 }
 
@@ -170,7 +223,14 @@ export async function createLlamaService(deps: LlamaServiceDeps): Promise<LlamaS
 	}
 
 	const binaryPath = await ensureLlamaBinary(deps.cacheDir, logger);
-	await ensureQwenModel(deps.modelDir, deps.modelFile, deps.mmprojFile, logger);
+	await ensureLlamaModel(
+		deps.modelDir,
+		deps.modelFile,
+		deps.mmprojFile,
+		deps.modelDownloadBaseUrl,
+		deps.modelLabel,
+		logger,
+	);
 
 	const binaryDir = dirname(binaryPath);
 	const args = [
@@ -183,13 +243,9 @@ export async function createLlamaService(deps: LlamaServiceDeps): Promise<LlamaS
 		"-c",
 		String(deps.contextWindow),
 		"--jinja",
-		"--chat-template-kwargs",
-		'{"enable_thinking":false}',
-		"--host",
-		deps.host,
-		"--port",
-		String(deps.port),
 	];
+	if (deps.chatTemplateKwargs) args.push("--chat-template-kwargs", deps.chatTemplateKwargs);
+	args.push("--host", deps.host, "--port", String(deps.port));
 	logger.log(`starting llama.cpp server: ${binaryPath} ${args.join(" ")}`);
 	const child = spawn(binaryPath, args, { cwd: binaryDir, stdio: ["ignore", "pipe", "pipe"] });
 	child.stdout?.on("data", (data: Buffer) => logger.log(data.toString().trim()));
@@ -201,6 +257,3 @@ export async function createLlamaService(deps: LlamaServiceDeps): Promise<LlamaS
 	logger.log(`llama.cpp server ready at ${deps.baseUrl}`);
 	return { stop: () => child.kill() };
 }
-
-export const defaultLlamaModelFile = QWEN_MODEL_FILE;
-export const defaultLlamaMmprojFile = QWEN_MMPROJ_FILE;

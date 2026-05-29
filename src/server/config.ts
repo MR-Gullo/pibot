@@ -1,8 +1,10 @@
 import { homedir } from "node:os";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { localLlmConfigs, parseLocalLlmId } from "./llama.js";
 
 const serverDir = fileURLToPath(new URL(".", import.meta.url));
+const localLlm = parseLocalLlmId(process.env.LOCAL_LLM);
 
 export const serverConfig = {
 	publicDir: resolve(serverDir, "../../public"),
@@ -18,8 +20,10 @@ export const serverConfig = {
 	llamaBaseUrl: process.env.LLAMA_BASE_URL ?? "http://127.0.0.1:8080/v1",
 	llamaHost: process.env.LLAMA_HOST ?? "127.0.0.1",
 	llamaPort: Number(process.env.LLAMA_PORT ?? 8080),
-	llamaContextWindow: Number(process.env.LLAMA_CONTEXT_WINDOW ?? 131072),
-	llamaModelDir: process.env.LLAMA_MODEL_DIR ?? resolve(homedir(), "models/qwen3.6-35b-a3b"),
+	localLlm,
+	llamaContextWindow: Number(process.env.LLAMA_CONTEXT_WINDOW ?? localLlmConfigs[localLlm].contextWindow),
+	llamaModelDir:
+		process.env.LLAMA_MODEL_DIR ?? resolve(homedir(), "models", localLlmConfigs[localLlm].defaultModelDirName),
 	qwen3TtsWorker: process.env.QWEN3_TTS_WORKER ?? "python",
 	qwen3TtsPythonCommand: process.env.QWEN3_TTS_PYTHON_COMMAND ?? "uv",
 	qwen3TtsPythonWorkerPath:

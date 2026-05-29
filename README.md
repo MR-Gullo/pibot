@@ -38,17 +38,18 @@ For phone access, expose port `8010` via ngrok HTTPS.
 
 ## Local LLM
 
-On startup, Pipi connects to an existing OpenAI-compatible llama.cpp server at `http://127.0.0.1:8080/v1` if one is already running. Otherwise it downloads a pinned llama.cpp release binary into `~/.cache/pibot/llama.cpp`, downloads missing Qwen3.6 35B A3B GGUF files into `~/models/qwen3.6-35b-a3b`, and starts `llama-server` automatically.
+On startup, Pipi connects to an existing OpenAI-compatible llama.cpp server at `http://127.0.0.1:8080/v1` if one is already running. Otherwise it downloads a pinned llama.cpp release binary into `~/.cache/pibot/llama.cpp`, downloads missing local LLM GGUF files, and starts `llama-server` automatically. The default local LLM is Qwen3.6 35B A3B. Set `LOCAL_LLM=gemma` to try `ggml-org/gemma-4-E2B-it-GGUF` instead.
 
 Override paths/settings with:
 
 ```bash
+LOCAL_LLM=qwen # or gemma
 PIBOT_CACHE_DIR=/path/to/cache
 LLAMA_BASE_URL=http://127.0.0.1:8080/v1
 LLAMA_HOST=127.0.0.1
 LLAMA_PORT=8080
 LLAMA_CONTEXT_WINDOW=131072
-LLAMA_MODEL_DIR=/path/to/qwen3.6-35b-a3b
+LLAMA_MODEL_DIR=/path/to/model-dir
 ```
 
 ## Native workers

@@ -3,7 +3,7 @@ import type { RobotState, ServerMessage } from "../types.js";
 import { serverConfig } from "./config.js";
 import { createRobotHarness, type RobotHarnessEvent } from "./harness.js";
 import { createHttpServer } from "./http-server.js";
-import { createLlamaService, defaultLlamaMmprojFile, defaultLlamaModelFile } from "./llama.js";
+import { createLlamaService, localLlmConfigs } from "./llama.js";
 import { createLogger, formatEntry } from "./logger.js";
 import { createFileMemoryStore } from "./memory-store.js";
 import { RobotClient } from "./robot-client.js";
@@ -35,15 +35,19 @@ const ttsLogger = logger.tag("tts");
 const executionEnv = new NodeExecutionEnv({ cwd: process.cwd() });
 const memoryStore = createFileMemoryStore(executionEnv, { path: serverConfig.memoryFile });
 const robot = new RobotClient();
+const localLlmConfig = localLlmConfigs[serverConfig.localLlm];
 const llama = await createLlamaService({
 	cacheDir: serverConfig.pibotCacheDir,
 	modelDir: serverConfig.llamaModelDir,
-	modelFile: defaultLlamaModelFile,
-	mmprojFile: defaultLlamaMmprojFile,
+	modelFile: localLlmConfig.modelFile,
+	mmprojFile: localLlmConfig.mmprojFile,
+	modelDownloadBaseUrl: localLlmConfig.downloadBaseUrl,
+	modelLabel: localLlmConfig.name,
 	baseUrl: serverConfig.llamaBaseUrl,
 	host: serverConfig.llamaHost,
 	port: serverConfig.llamaPort,
 	contextWindow: serverConfig.llamaContextWindow,
+	chatTemplateKwargs: localLlmConfig.chatTemplateKwargs,
 	logger,
 });
 const tts = createTtsService({
@@ -64,6 +68,9 @@ const harness = await createRobotHarness({
 	env: executionEnv,
 	logger,
 	memoryStore,
+	localLlm: serverConfig.localLlm,
+	localBaseUrl: serverConfig.llamaBaseUrl,
+	localContextWindow: serverConfig.llamaContextWindow,
 	maxContextImages: serverConfig.maxContextImages,
 	robot,
 	onEvent: handleHarnessEvent,

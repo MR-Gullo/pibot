@@ -10,47 +10,51 @@ import {
 	type Model,
 	type TextContent,
 } from "@earendil-works/pi-ai";
+import type { LocalLlmConfig, LocalLlmId } from "./llama.js";
+import { localLlmConfigs } from "./llama.js";
 import type { Logger } from "./logger.js";
 import type { RobotClient } from "./robot-client.js";
 import { createRobotTools, pruneImagesForContext } from "./tools/index.js";
 import type { MemoryStore } from "./tools/memory.js";
 
-const LOCAL_PROVIDER = "llama-cpp-qwen36";
-const LOCAL_MODEL_ID = "Qwen3.6-35B-A3B-UD-Q5_K_M.gguf";
+const LOCAL_PROVIDER = "llama-cpp-local";
 const LOCAL_API_KEY = "EMPTY";
 
-const localQwenModel = {
-	id: LOCAL_MODEL_ID,
-	name: "Qwen3.6 35B A3B Q5 llama.cpp Local",
-	api: "openai-completions",
-	provider: LOCAL_PROVIDER,
-	baseUrl: "http://127.0.0.1:8080/v1",
-	reasoning: false,
-	input: ["text", "image"],
-	cost: {
-		input: 0,
-		output: 0,
-		cacheRead: 0,
-		cacheWrite: 0,
-	},
-	contextWindow: 131072,
-	maxTokens: 16384,
-	compat: {
-		supportsStore: false,
-		supportsDeveloperRole: false,
-		supportsReasoningEffort: false,
-		supportsUsageInStreaming: false,
-		supportsStrictMode: false,
-		maxTokensField: "max_tokens",
-	},
-} satisfies Model<"openai-completions">;
+function createLocalModel(config: LocalLlmConfig, baseUrl: string, contextWindow: number): Model<"openai-completions"> {
+	return {
+		id: config.modelFile,
+		name: config.name,
+		api: "openai-completions",
+		provider: LOCAL_PROVIDER,
+		baseUrl,
+		reasoning: false,
+		input: [...config.input],
+		cost: {
+			input: 0,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+		},
+		contextWindow,
+		maxTokens: config.maxTokens,
+		compat: {
+			supportsStore: false,
+			supportsDeveloperRole: false,
+			supportsReasoningEffort: false,
+			supportsUsageInStreaming: false,
+			supportsStrictMode: false,
+			maxTokensField: "max_tokens",
+		},
+	};
+}
 
-function selectModel(): Model<Api> {
+function selectModel(localLlm: LocalLlmId, localBaseUrl: string, localContextWindow: number): Model<Api> {
 	const provider = process.env.PI_PROVIDER ?? LOCAL_PROVIDER;
-	const modelId = process.env.PI_MODEL ?? LOCAL_MODEL_ID;
+	const modelId = process.env.PI_MODEL ?? localLlmConfigs[localLlm].modelFile;
 	if (provider === LOCAL_PROVIDER) {
-		if (modelId !== LOCAL_MODEL_ID) throw new Error(`Unknown PI_MODEL for ${provider}: ${modelId}`);
-		return localQwenModel;
+		const config = localLlmConfigs[localLlm];
+		if (modelId !== config.modelFile) throw new Error(`Unknown PI_MODEL for ${provider}/${localLlm}: ${modelId}`);
+		return createLocalModel(config, localBaseUrl, localContextWindow);
 	}
 	if (!getProviders().includes(provider as KnownProvider)) throw new Error(`Unknown PI_PROVIDER: ${provider}`);
 	const models = getModels(provider as KnownProvider);
@@ -102,6 +106,9 @@ export async function createRobotHarness(deps: {
 	env: NodeExecutionEnv;
 	logger: Logger;
 	memoryStore: MemoryStore;
+	localLlm: LocalLlmId;
+	localBaseUrl: string;
+	localContextWindow: number;
 	maxContextImages: number;
 	robot: RobotClient;
 	onEvent: (event: RobotHarnessEvent) => void | Promise<void>;
@@ -117,7 +124,7 @@ export async function createRobotHarness(deps: {
 			console.error(`[harness] event handler failed: ${error instanceof Error ? error.message : String(error)}`);
 		}
 	};
-	const selectedModel = selectModel();
+	const selectedModel = selectModel(deps.localLlm, deps.localBaseUrl, deps.localContextWindow);
 	let harness = await buildHarness();
 
 	async function buildHarness(): Promise<AgentHarness> {
