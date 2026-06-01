@@ -279,6 +279,7 @@ export function createSttService(deps: SttServiceDeps): SttService {
 		childProcess?.kill();
 	}
 
+	workerCommand();
 	startWorker();
 	return { handleAudioFrame, stopChildProcess };
 }
