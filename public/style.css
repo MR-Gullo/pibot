@@ -715,3 +715,10 @@ spotify-panel input {
 		transform: translateX(2%);
 	}
 }
+
+/* Keep the face static by default; continuous CSS animations burn GPU/WindowServer CPU on phones. */
+.face,
+.face .eye,
+.face .brow {
+	animation: none !important;
+}

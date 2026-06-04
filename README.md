@@ -36,10 +36,11 @@ For phone access, expose port `8010` over HTTPS, for example with ngrok.
 
 Pipi runs local LLM, STT, and TTS models. Missing default models are downloaded automatically on startup.
 
-- LLM: Gemma 4 26B A4B MoE Q4 via llama.cpp.
+- LLM default: Gemma 4 26B A4B MoE Q4 via llama.cpp.
   - Model: `ggml-org/gemma-4-26B-A4B-it-GGUF`
   - Downloaded into: `~/models/gemma-4-26b-a4b-it`
   - Pipi also downloads a pinned llama.cpp release into `~/.cache/pibot/llama.cpp`.
+  - Use `LOCAL_LLM=gemma12b npm run dev` for Gemma 4 12B IT Q4 from `unsloth/gemma-4-12b-it-GGUF`, downloaded into `~/models/gemma-4-12b-it`.
 
 - STT default: native `parakeet.cpp` GGUF worker with whisper.cpp GGML Silero VAD.
   - Build with `npm run build:stt-parakeet-cpp`.

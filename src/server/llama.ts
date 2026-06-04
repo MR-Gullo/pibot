@@ -5,7 +5,7 @@ import { chmod, mkdir, rename, stat, unlink } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type { Logger } from "./logger.js";
 
-const LLAMA_CPP_RELEASE = "b9370";
+const LLAMA_CPP_RELEASE = "b9518";
 const LLAMA_CPP_BASE_URL = `https://github.com/ggml-org/llama.cpp/releases/download/${LLAMA_CPP_RELEASE}`;
 
 export interface LocalLlmConfig {
@@ -43,6 +43,17 @@ export const localLlmConfigs = {
 		input: ["text", "image"],
 		chatTemplateKwargs: '{"enable_thinking":false}',
 	},
+	gemma12b: {
+		name: "Gemma 4 12B IT Q4 llama.cpp Local",
+		modelFile: "gemma-4-12b-it-Q4_K_M.gguf",
+		mmprojFile: "mmproj-F16.gguf",
+		downloadBaseUrl: "https://huggingface.co/unsloth/gemma-4-12b-it-GGUF/resolve/main",
+		defaultModelDirName: "gemma-4-12b-it",
+		contextWindow: 131072,
+		maxTokens: 16384,
+		input: ["text", "image"],
+		chatTemplateKwargs: '{"enable_thinking":false}',
+	},
 } satisfies Record<string, LocalLlmConfig>;
 
 export type LocalLlmId = keyof typeof localLlmConfigs;
@@ -50,8 +61,9 @@ export type LocalLlmId = keyof typeof localLlmConfigs;
 export function parseLocalLlmId(value: string | undefined): LocalLlmId {
 	const normalized = value?.toLowerCase();
 	if (!normalized || normalized === "gemma") return "gemma";
+	if (normalized === "gemma12b" || normalized === "gemma-12b") return "gemma12b";
 	if (normalized === "qwen") return "qwen";
-	throw new Error(`Unknown LOCAL_LLM: ${value}. Expected qwen or gemma.`);
+	throw new Error(`Unknown LOCAL_LLM: ${value}. Expected qwen, gemma, or gemma12b.`);
 }
 
 export interface LlamaServiceDeps {
