@@ -38,6 +38,19 @@ export interface SpeechTool {
 	failPcmStream: (message: string) => void;
 }
 
+interface FaceAmplitudeElement extends HTMLElement {
+	amplitude: number;
+}
+
+function setFaceAmplitude(face: HTMLElement, value: number): void {
+	const clamped = Math.max(0, Math.min(1, value));
+	if ("amplitude" in face) {
+		(face as FaceAmplitudeElement).amplitude = clamped;
+		return;
+	}
+	face.style.setProperty("--amp", clamped.toFixed(3));
+}
+
 export function createSpeechTool(deps: {
 	logger: ClientLogger;
 	face: HTMLElement;
@@ -70,14 +83,14 @@ export function createSpeechTool(deps: {
 			const rms = Math.sqrt(sum / data.length);
 			const amp = Math.min(1, rms * 3.4);
 			smoothed = smoothed * 0.55 + amp * 0.45;
-			deps.face.style.setProperty("--amp", smoothed.toFixed(3));
+			setFaceAmplitude(deps.face, smoothed);
 			frameHandle = requestAnimationFrame(tick);
 		};
 		frameHandle = requestAnimationFrame(tick);
 		return () => {
 			stopped = true;
 			cancelAnimationFrame(frameHandle);
-			deps.face.style.setProperty("--amp", "0");
+			setFaceAmplitude(deps.face, 0);
 		};
 	}
 

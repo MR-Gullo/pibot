@@ -1,6 +1,6 @@
 import type { ClientMessage, RobotState } from "../types.js";
-import "./components/robot-face.js";
-import type { RobotFaceElement, RobotFaceState } from "./components/robot-face.js";
+import "./components/robot-face-webgl.js";
+import type { RobotFaceState, RobotFaceWebglElement } from "./components/robot-face-webgl.js";
 import "./components/robot-log.js";
 import type { RobotLogElement } from "./components/robot-log.js";
 import "./components/setup-panel.js";
@@ -17,7 +17,7 @@ import { createRobotTools } from "./tools/index.js";
 const setup = document.querySelector<HTMLElement>("#setup");
 const robot = document.querySelector<HTMLElement>("#robot");
 const logEl = document.querySelector<RobotLogElement>("#log");
-const face = document.querySelector<RobotFaceElement>("#face");
+const face = document.querySelector<RobotFaceWebglElement>("#face");
 const setupFaceHost = document.querySelector<HTMLElement>("#setupFaceHost");
 const setupPanel = document.querySelector<RobotSetupPanelElement>("#setupPanel");
 const spotifyPanel = document.querySelector<SpotifyPanelElement>("#spotifyPanel");
