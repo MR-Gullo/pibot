@@ -28,11 +28,12 @@ interface Palette {
 	eyeTop: string;
 	eyeMid: string;
 	eyeBottom: string;
+	eyeInset: string;
 	eyeGlow: string;
 	eyeGlowSoft: string;
-	eyeInset: string;
 	browMid: string;
 	browGlow: string;
+	aura: string;
 }
 
 interface Sprite {
@@ -44,6 +45,7 @@ interface Sprite {
 interface SpriteSet {
 	eye: Sprite;
 	brow: Sprite;
+	aura: Sprite;
 }
 
 interface DrawPose {
@@ -54,6 +56,7 @@ interface DrawPose {
 	scaleY: number;
 	alpha: number;
 	brightness: number;
+	additive?: boolean;
 }
 
 const palettes: Record<RobotFaceState, Palette> = {
@@ -71,11 +74,12 @@ function cyanPalette(): Palette {
 		eyeTop: "#d7ffff",
 		eyeMid: "#58e8ff",
 		eyeBottom: "#33a8ff",
-		eyeGlow: "rgba(102, 244, 255, 0.78)",
-		eyeGlowSoft: "rgba(57, 216, 255, 0.42)",
-		eyeInset: "rgba(0, 68, 120, 0.22)",
+		eyeInset: "rgba(0, 68, 120, 0.30)",
+		eyeGlow: "rgba(102, 244, 255, 0.85)",
+		eyeGlowSoft: "rgba(57, 216, 255, 0.45)",
 		browMid: "#9ff5ff",
-		browGlow: "rgba(190, 250, 255, 0.52)",
+		browGlow: "rgba(190, 250, 255, 0.6)",
+		aura: "96, 236, 255",
 	};
 }
 
@@ -84,11 +88,12 @@ function purplePalette(): Palette {
 		eyeTop: "#f1eaff",
 		eyeMid: "#b89aff",
 		eyeBottom: "#6a4cff",
-		eyeGlow: "rgba(205, 184, 255, 0.78)",
+		eyeInset: "rgba(50, 25, 120, 0.30)",
+		eyeGlow: "rgba(205, 184, 255, 0.85)",
 		eyeGlowSoft: "rgba(150, 120, 255, 0.46)",
-		eyeInset: "rgba(50, 25, 120, 0.24)",
 		browMid: "#d8c7ff",
-		browGlow: "rgba(190, 170, 255, 0.48)",
+		browGlow: "rgba(200, 180, 255, 0.55)",
+		aura: "150, 120, 255",
 	};
 }
 
@@ -97,11 +102,12 @@ function pinkPalette(): Palette {
 		eyeTop: "#fff0f7",
 		eyeMid: "#ff8ec1",
 		eyeBottom: "#ff3d8b",
-		eyeGlow: "rgba(255, 183, 218, 0.78)",
-		eyeGlowSoft: "rgba(255, 120, 180, 0.46)",
-		eyeInset: "rgba(130, 20, 70, 0.22)",
+		eyeInset: "rgba(130, 20, 70, 0.30)",
+		eyeGlow: "rgba(255, 183, 218, 0.85)",
+		eyeGlowSoft: "rgba(255, 120, 180, 0.48)",
 		browMid: "#ffd0e6",
-		browGlow: "rgba(255, 180, 210, 0.52)",
+		browGlow: "rgba(255, 190, 220, 0.55)",
+		aura: "255, 120, 180",
 	};
 }
 
@@ -110,11 +116,12 @@ function redPalette(): Palette {
 		eyeTop: "#fff0f0",
 		eyeMid: "#ff8a8a",
 		eyeBottom: "#ff2b4f",
-		eyeGlow: "rgba(255, 154, 160, 0.78)",
+		eyeInset: "rgba(130, 20, 35, 0.30)",
+		eyeGlow: "rgba(255, 154, 160, 0.85)",
 		eyeGlowSoft: "rgba(255, 80, 100, 0.5)",
-		eyeInset: "rgba(130, 20, 35, 0.24)",
 		browMid: "#ffc1c1",
-		browGlow: "rgba(255, 170, 170, 0.5)",
+		browGlow: "rgba(255, 175, 175, 0.55)",
+		aura: "255, 90, 110",
 	};
 }
 
@@ -183,51 +190,60 @@ function createTextureSprite(
 }
 
 function createEyeSprite(gl: WebGLRenderingContext, palette: Palette, dpr: number): Sprite {
-	return createTextureSprite(gl, 300, 260, dpr, (ctx) => {
-		const cx = 150;
-		const cy = 132;
-		const rx = 91;
-		const ry = 78;
+	return createTextureSprite(gl, 360, 340, dpr, (ctx) => {
+		const cx = 180;
+		const cy = 170;
+		const rx = 92;
+		const ry = 82;
+		const ellipse = (): void => {
+			ctx.beginPath();
+			ctx.ellipse(cx, cy, rx, ry, 0, 0, Math.PI * 2);
+			ctx.fill();
+		};
 		ctx.shadowColor = palette.eyeGlowSoft;
-		ctx.shadowBlur = 46;
+		ctx.shadowBlur = 64;
 		ctx.fillStyle = palette.eyeGlowSoft;
-		ctx.beginPath();
-		ctx.ellipse(cx, cy, rx, ry, 0, 0, Math.PI * 2);
-		ctx.fill();
+		ellipse();
 		ctx.shadowColor = palette.eyeGlow;
-		ctx.shadowBlur = 20;
+		ctx.shadowBlur = 26;
 		ctx.fillStyle = palette.eyeGlow;
-		ctx.beginPath();
-		ctx.ellipse(cx, cy, rx, ry, 0, 0, Math.PI * 2);
-		ctx.fill();
+		ellipse();
 		ctx.shadowBlur = 0;
 		const fill = ctx.createLinearGradient(0, cy - ry, 0, cy + ry);
 		fill.addColorStop(0, palette.eyeTop);
 		fill.addColorStop(0.58, palette.eyeMid);
 		fill.addColorStop(1, palette.eyeBottom);
 		ctx.fillStyle = fill;
-		ctx.beginPath();
-		ctx.ellipse(cx, cy, rx, ry, 0, 0, Math.PI * 2);
-		ctx.fill();
+		ellipse();
 		const shade = ctx.createLinearGradient(0, cy - ry, 0, cy + ry);
-		shade.addColorStop(0, "rgba(255,255,255,0.16)");
-		shade.addColorStop(0.55, "rgba(255,255,255,0)");
+		shade.addColorStop(0, "rgba(255, 255, 255, 0.28)");
+		shade.addColorStop(0.5, "rgba(255, 255, 255, 0)");
 		shade.addColorStop(1, palette.eyeInset);
 		ctx.fillStyle = shade;
-		ctx.beginPath();
-		ctx.ellipse(cx, cy, rx, ry, 0, 0, Math.PI * 2);
-		ctx.fill();
+		ellipse();
+		const highlight = ctx.createRadialGradient(
+			cx - rx * 0.32,
+			cy - ry * 0.46,
+			4,
+			cx - rx * 0.32,
+			cy - ry * 0.46,
+			rx * 0.7,
+		);
+		highlight.addColorStop(0, "rgba(255, 255, 255, 0.55)");
+		highlight.addColorStop(1, "rgba(255, 255, 255, 0)");
+		ctx.fillStyle = highlight;
+		ellipse();
 	});
 }
 
 function createBrowSprite(gl: WebGLRenderingContext, palette: Palette, dpr: number): Sprite {
-	return createTextureSprite(gl, 250, 110, dpr, (ctx) => {
-		const x = 24;
-		const y = 36;
-		const w = 202;
+	return createTextureSprite(gl, 300, 140, dpr, (ctx) => {
+		const x = 48;
+		const y = 54;
+		const w = 204;
 		const h = 32;
 		ctx.shadowColor = palette.browGlow;
-		ctx.shadowBlur = 18;
+		ctx.shadowBlur = 26;
 		ctx.fillStyle = palette.browGlow;
 		roundedRect(ctx, x, y, w, h, 16);
 		ctx.fill();
@@ -241,11 +257,26 @@ function createBrowSprite(gl: WebGLRenderingContext, palette: Palette, dpr: numb
 	});
 }
 
+function createAuraSprite(gl: WebGLRenderingContext, palette: Palette, dpr: number): Sprite {
+	return createTextureSprite(gl, 260, 240, dpr, (ctx) => {
+		const cx = 130;
+		const cy = 120;
+		const radius = 116;
+		const gradient = ctx.createRadialGradient(cx, cy, 0, cx, cy, radius);
+		gradient.addColorStop(0, `rgba(${palette.aura}, 0.85)`);
+		gradient.addColorStop(0.4, `rgba(${palette.aura}, 0.22)`);
+		gradient.addColorStop(1, `rgba(${palette.aura}, 0)`);
+		ctx.fillStyle = gradient;
+		ctx.fillRect(0, 0, 260, 240);
+	});
+}
+
 function stateSprites(gl: WebGLRenderingContext, state: RobotFaceState, dpr: number): SpriteSet {
 	const palette = palettes[state];
 	return {
 		eye: createEyeSprite(gl, palette, dpr),
 		brow: createBrowSprite(gl, palette, dpr),
+		aura: createAuraSprite(gl, palette, dpr),
 	};
 }
 
@@ -256,8 +287,10 @@ export class RobotFaceWebglElement extends HTMLElement {
 	private alphaLocation: WebGLUniformLocation | null = null;
 	private brightnessLocation: WebGLUniformLocation | null = null;
 	private currentState: RobotFaceState = "inactive";
+	private previousState: RobotFaceState = "inactive";
 	private stateChangedAt = 0;
 	private currentAmplitude = 0;
+	private displayAmplitude = 0;
 	private animationFrame = 0;
 	private connected = false;
 	private dpr = 1;
@@ -303,7 +336,10 @@ export class RobotFaceWebglElement extends HTMLElement {
 	}
 
 	set state(state: RobotFaceState) {
-		if (this.currentState !== state) this.stateChangedAt = performance.now();
+		if (this.currentState !== state) {
+			this.previousState = this.currentState;
+			this.stateChangedAt = performance.now();
+		}
 		this.currentState = state;
 		this.setAttribute("state", state);
 		for (const entry of states) this.classList.toggle(entry, entry === state);
@@ -437,7 +473,7 @@ export class RobotFaceWebglElement extends HTMLElement {
 		this.gl.bufferData(this.gl.ARRAY_BUFFER, vertices, this.gl.STREAM_DRAW);
 		this.gl.uniform1f(this.alphaLocation, pose.alpha);
 		this.gl.uniform1f(this.brightnessLocation, pose.brightness);
-		this.gl.blendFunc(this.gl.ONE, this.gl.ONE_MINUS_SRC_ALPHA);
+		this.gl.blendFunc(this.gl.ONE, pose.additive ? this.gl.ONE : this.gl.ONE_MINUS_SRC_ALPHA);
 		this.gl.drawArrays(this.gl.TRIANGLES, 0, 6);
 	}
 
@@ -445,8 +481,9 @@ export class RobotFaceWebglElement extends HTMLElement {
 		const gl = this.gl;
 		if (!gl) return;
 		const state = this.currentState;
-		const sprites = this.spriteSet(state);
-		const amp = state === "speaking" ? Math.max(this.currentAmplitude, 0.08) : 0;
+		const targetAmp = state === "speaking" ? Math.max(this.currentAmplitude, 0.06) : 0;
+		this.displayAmplitude += (targetAmp - this.displayAmplitude) * 0.18;
+		const amp = this.displayAmplitude;
 		const blink = this.blinkScale(time, state);
 		const face = this.facePose(time, state, amp, stateElapsedMs);
 		const eye = this.eyePose(time, state, amp);
@@ -466,40 +503,54 @@ export class RobotFaceWebglElement extends HTMLElement {
 		};
 		const leftEye = transform(baseWidth * 0.3 + this.lookX + eye.scanX, baseHeight * 0.53 + this.lookY);
 		const rightEye = transform(baseWidth * 0.7 + this.lookX + eye.scanX, baseHeight * 0.53 + this.lookY);
-		this.drawSprite(sprites.eye, {
-			...leftEye,
-			rotation: face.rotation,
-			scaleX: face.scale * eye.scaleX,
-			scaleY: face.scale * eye.scaleY * blink,
-			alpha: eye.alpha,
-			brightness: eye.brightness,
-		});
-		this.drawSprite(sprites.eye, {
-			...rightEye,
-			rotation: face.rotation,
-			scaleX: face.scale * eye.scaleX,
-			scaleY: face.scale * eye.scaleY * blink,
-			alpha: eye.alpha,
-			brightness: eye.brightness,
-		});
 		const leftBrowPoint = transform(baseWidth * 0.29, leftBrow.y);
 		const rightBrowPoint = transform(baseWidth * 0.71, rightBrow.y);
-		this.drawSprite(sprites.brow, {
-			...leftBrowPoint,
-			rotation: face.rotation + leftBrow.rotation,
-			scaleX: face.scale,
-			scaleY: face.scale,
-			alpha: 1,
-			brightness: 1,
-		});
-		this.drawSprite(sprites.brow, {
-			...rightBrowPoint,
-			rotation: face.rotation + rightBrow.rotation,
-			scaleX: face.scale,
-			scaleY: face.scale,
-			alpha: 1,
-			brightness: 1,
-		});
+		const auraAlpha = 0.08 + amp * 0.4;
+		const auraScale = face.scale * (1 + amp * 0.12);
+
+		const renderLayer = (sprites: SpriteSet, fade: number): void => {
+			const aura = {
+				rotation: 0,
+				scaleX: auraScale,
+				scaleY: auraScale,
+				alpha: auraAlpha * fade,
+				brightness: 1,
+				additive: true,
+			};
+			this.drawSprite(sprites.aura, { ...leftEye, ...aura });
+			this.drawSprite(sprites.aura, { ...rightEye, ...aura });
+			const eyePose = {
+				rotation: face.rotation,
+				scaleX: face.scale * eye.scaleX,
+				scaleY: face.scale * eye.scaleY * blink,
+				alpha: eye.alpha * fade,
+				brightness: eye.brightness,
+			};
+			this.drawSprite(sprites.eye, { ...leftEye, ...eyePose });
+			this.drawSprite(sprites.eye, { ...rightEye, ...eyePose });
+			this.drawSprite(sprites.brow, {
+				...leftBrowPoint,
+				rotation: face.rotation + leftBrow.rotation,
+				scaleX: face.scale,
+				scaleY: face.scale,
+				alpha: fade,
+				brightness: 1,
+			});
+			this.drawSprite(sprites.brow, {
+				...rightBrowPoint,
+				rotation: face.rotation + rightBrow.rotation,
+				scaleX: face.scale,
+				scaleY: face.scale,
+				alpha: fade,
+				brightness: 1,
+			});
+		};
+
+		const transitionMs = 380;
+		const raw = Math.max(0, Math.min(1, stateElapsedMs / transitionMs));
+		const t = raw * raw * (3 - 2 * raw);
+		if (t < 1 && this.previousState !== state) renderLayer(this.spriteSet(this.previousState), 1 - t);
+		renderLayer(this.spriteSet(state), t < 1 && this.previousState !== state ? t : 1);
 	}
 
 	private blinkScale(time: number, state: RobotFaceState): number {

@@ -32,9 +32,7 @@ body {
 	padding: 1rem;
 	border: 1px solid rgba(130, 210, 255, 0.18);
 	border-radius: 24px;
-	background: rgba(8, 14, 24, 0.76);
-	box-shadow: 0 24px 70px rgba(0, 0, 0, 0.38);
-	backdrop-filter: blur(14px);
+	background: #0b1320;
 }
 
 .controls {
@@ -77,7 +75,6 @@ button.primary {
 	color: #04101f;
 	border: 0;
 	font-weight: 800;
-	box-shadow: 0 0 38px rgba(64, 220, 255, 0.34);
 }
 
 button:hover,
@@ -110,8 +107,7 @@ spotify-panel {
 	padding: 1rem;
 	border: 1px solid rgba(30, 215, 96, 0.28);
 	border-radius: 24px;
-	background: rgba(8, 20, 13, 0.86);
-	box-shadow: 0 24px 70px rgba(0, 0, 0, 0.32);
+	background: #0a140d;
 }
 
 spotify-panel[hidden] {
@@ -202,9 +198,7 @@ spotify-panel input {
 	padding: 0.85rem;
 	border: 1px solid rgba(30, 215, 96, 0.28);
 	border-radius: 18px;
-	background: rgba(4, 10, 7, 0.72);
-	box-shadow: 0 18px 54px rgba(0, 0, 0, 0.42);
-	backdrop-filter: blur(12px);
+	background: #08110b;
 }
 
 .spotify-now-playing[hidden] {
