@@ -1,4 +1,5 @@
 import { NodeExecutionEnv } from "@earendil-works/pi-agent-core/node";
+import type { AssistantMessage } from "@earendil-works/pi-ai";
 import type { RobotState, ServerMessage } from "../types.js";
 import { type AuthenticatedUser, UserAuthService } from "./auth.js";
 import { serverConfig } from "./config.js";
@@ -195,20 +196,46 @@ function looksLikeStopCommand(text: string): boolean {
 }
 
 function submitPrompt(runtime: UserRuntime, text: string): void {
-	setRobotState(runtime, { phase: "thinking", heardText: text, assistantText: "" });
-	void runtime.harness
-		.current()
-		.prompt(text)
-		.catch((error) => {
-			const message = error instanceof Error ? error.message : String(error);
-			if (message.includes("busy")) {
-				sttLogger.log(`[${runtime.userId}] ignored final while agent busy: ${JSON.stringify(text)}`);
-				setRobotState(runtime, { phase: "listening" });
-				return;
-			}
-			sttLogger.log(`[${runtime.userId}] prompt failed: ${message}`);
-			setRobotState(runtime, { phase: "error", message });
-		});
+	void runPrompt(runtime, text, false);
+}
+
+function assistantMessageText(message: AssistantMessage): string {
+	return message.content
+		.filter(
+			(content): content is Extract<AssistantMessage["content"][number], { type: "text" }> =>
+				content.type === "text",
+		)
+		.map((content) => content.text)
+		.join("");
+}
+
+async function runPrompt(runtime: UserRuntime, text: string, isContinuation: boolean): Promise<void> {
+	setRobotState(runtime, { phase: "thinking", heardText: isContinuation ? undefined : text, assistantText: "" });
+	let message: AssistantMessage;
+	try {
+		message = await runtime.harness.current().prompt(text);
+	} catch (error) {
+		const message = error instanceof Error ? error.message : String(error);
+		if (message.includes("busy")) {
+			sttLogger.log(`[${runtime.userId}] ignored final while agent busy: ${JSON.stringify(text)}`);
+			setRobotState(runtime, { phase: "listening" });
+			return;
+		}
+		sttLogger.log(`[${runtime.userId}] prompt failed: ${message}`);
+		setRobotState(runtime, { phase: "error", message });
+		return;
+	}
+	if (assistantMessageText(message).trim() || !runtime.connected || runtime.bargeInActive) return;
+	if (isContinuation) {
+		setRobotState(runtime, { phase: "listening" });
+		return;
+	}
+	agentLogger.log(`[${runtime.userId}] empty settled agent response; requesting continuation`);
+	await runPrompt(
+		runtime,
+		"Interne Fortsetzung: Deine letzte Antwort war leer. Antworte dem Nutzer jetzt kurz und hilfreich auf Deutsch. Wenn gerade ein Werkzeug ausgeführt wurde, bestätige knapp das Ergebnis. Rufe kein Werkzeug nur wegen dieser Fortsetzung auf.",
+		true,
+	);
 }
 
 function handleSttEvent(event: SttEvent): void {
@@ -423,7 +450,7 @@ async function handleHarnessEvent(runtime: UserRuntime, event: RobotHarnessEvent
 			tts.pushText(runtime.userId, tail);
 		}
 		if (runtime.ttsStartedForTurn) tts.end(runtime.userId);
-		else setRobotState(runtime, { phase: "listening" });
+		else if (event.text) setRobotState(runtime, { phase: "listening" });
 	}
 	if (event.type === "session_reset") {
 		setRobotState(runtime, sttReady ? { phase: "listening" } : { phase: "inactive" });
