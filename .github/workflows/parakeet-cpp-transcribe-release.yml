@@ -43,7 +43,7 @@ jobs:
           mkdir -p dist release-assets
           cp native/parakeet-cpp-stt/build-release/parakeet-cpp-transcribe dist/parakeet-cpp-transcribe
           tar -C dist -czf release-assets/parakeet-cpp-transcribe-macos-arm64.tar.gz parakeet-cpp-transcribe
-          shasum -a 256 release-assets/parakeet-cpp-transcribe-macos-arm64.tar.gz > release-assets/parakeet-cpp-transcribe-macos-arm64.tar.gz.sha256
+          (cd release-assets && shasum -a 256 parakeet-cpp-transcribe-macos-arm64.tar.gz > parakeet-cpp-transcribe-macos-arm64.tar.gz.sha256)
 
       - name: Release
         uses: softprops/action-gh-release@v2
