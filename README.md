@@ -51,6 +51,7 @@ Pipi runs local LLM, STT, and TTS models. Missing default models are downloaded 
   - Model: `ggml-org/gemma-4-26B-A4B-it-GGUF`
   - Downloaded into: `~/models/gemma-4-26b-a4b-it`
   - Pipi also downloads a pinned llama.cpp release into `~/.cache/pibot/llama.cpp`.
+  - Linux downloads the pinned Vulkan-enabled llama.cpp release.
   - Override the llama.cpp server binary with `LLAMA_CPP_BINARY_PATH=/path/to/llama-server`.
   - Use `LOCAL_LLM=gemma12b npm run dev` for Gemma 4 12B IT Q4 from `unsloth/gemma-4-12b-it-GGUF`, downloaded into `~/models/gemma-4-12b-it`.
 

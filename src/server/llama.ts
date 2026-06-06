@@ -97,8 +97,8 @@ function llamaAssetName(): string {
 		if (process.arch === "x64") return `llama-${LLAMA_CPP_RELEASE}-bin-macos-x64.tar.gz`;
 	}
 	if (process.platform === "linux") {
-		if (process.arch === "arm64") return `llama-${LLAMA_CPP_RELEASE}-bin-ubuntu-arm64.tar.gz`;
-		if (process.arch === "x64") return `llama-${LLAMA_CPP_RELEASE}-bin-ubuntu-x64.tar.gz`;
+		if (process.arch === "arm64") return `llama-${LLAMA_CPP_RELEASE}-bin-ubuntu-vulkan-arm64.tar.gz`;
+		if (process.arch === "x64") return `llama-${LLAMA_CPP_RELEASE}-bin-ubuntu-vulkan-x64.tar.gz`;
 	}
 	throw new Error(`Unsupported llama.cpp release platform: ${process.platform}/${process.arch}`);
 }
