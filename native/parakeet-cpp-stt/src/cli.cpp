@@ -18,6 +18,7 @@
 
 static constexpr int TARGET_SAMPLE_RATE = 16000;
 static constexpr size_t DEFAULT_CHUNK_SECONDS = 30;
+static constexpr size_t TEXT_CHUNK_SECONDS = 15;
 static constexpr const char* DEFAULT_MODEL_FILE = "tdt-0.6b-v3-q8_0.gguf";
 static constexpr const char* PARAKEET_CPP_REPO = "https://huggingface.co/mudler/parakeet-cpp-gguf/resolve/main";
 
@@ -181,9 +182,23 @@ static void ensure_model_file(const std::string& path) {
     std::filesystem::rename(tmp_path, path);
 }
 
+static std::string timestamp(size_t seconds) {
+    const size_t minutes = seconds / 60;
+    const size_t remaining_seconds = seconds % 60;
+    std::string out;
+    if (minutes < 10) out += "0";
+    out += std::to_string(minutes) + ":";
+    if (remaining_seconds < 10) out += "0";
+    out += std::to_string(remaining_seconds);
+    return out;
+}
+
 static void print_help(const char* program) {
-    std::cout << "usage: " << program << " <audio.wav> [model.gguf]\n\n"
-              << "Transcribe a WAV file with parakeet.cpp and emit JSON with word timestamps.\n\n"
+    std::cout << "usage: " << program << " [--text] <audio.wav> [model.gguf]\n\n"
+              << "Transcribe a WAV file with parakeet.cpp. Defaults to JSON with word timestamps.\n\n"
+              << "Options:\n"
+              << "  --text, -t     Output plain text grouped in 15 second timestamped chunks.\n"
+              << "  --help, -h     Show this help.\n\n"
               << "Arguments:\n"
               << "  audio.wav      PCM 16/24/32-bit or float32 WAV. Multi-channel audio is mixed to mono.\n"
               << "  model.gguf     Optional GGUF model path. Overrides PARAKEET_CPP_MODEL_PATH.\n\n"
@@ -204,26 +219,40 @@ static void print_help(const char* program) {
               << "      {\"w\": \"hello\", \"start\": 0.48, \"end\": 0.72, \"conf\": 0.91}\n"
               << "    ]\n"
               << "  }\n\n"
-              << "Times are seconds. conf is word confidence aggregated from token confidences.\n";
+              << "Times are seconds. conf is word confidence aggregated from token confidences.\n\n"
+              << "Text output format:\n"
+              << "  [00:00-00:15] transcript text for that chunk\n";
 }
 
 int main(int argc, char** argv) {
     try {
-        if (argc == 2 && (std::string(argv[1]) == "--help" || std::string(argv[1]) == "-h")) {
-            print_help(argv[0]);
-            return 0;
+        bool text_output = false;
+        std::vector<std::string> args;
+        for (int i = 1; i < argc; ++i) {
+            const std::string arg = argv[i];
+            if (arg == "--help" || arg == "-h") {
+                print_help(argv[0]);
+                return 0;
+            }
+            if (arg == "--text" || arg == "-t") {
+                text_output = true;
+                continue;
+            }
+            args.push_back(arg);
         }
-        if (argc < 2 || argc > 3) {
+        if (args.empty() || args.size() > 2) {
             print_help(argv[0]);
             return 2;
         }
         const char* env_model = std::getenv("PARAKEET_CPP_MODEL_PATH");
-        const std::string model_path = argc == 3 ? argv[2] : (env_model ? env_model : default_model_path());
+        const std::string model_path = args.size() == 2 ? args[1] : (env_model ? env_model : default_model_path());
         ensure_model_file(model_path);
 
-        WavAudio wav = load_wav(argv[1]);
+        WavAudio wav = load_wav(args[0]);
         std::vector<float> audio = resample_linear(wav.mono, wav.sample_rate);
-        const size_t chunk_frames = std::max<size_t>(1, env_size("PARAKEET_CLI_CHUNK_SECONDS", DEFAULT_CHUNK_SECONDS) * TARGET_SAMPLE_RATE);
+        const size_t default_chunk_seconds = text_output ? TEXT_CHUNK_SECONDS : DEFAULT_CHUNK_SECONDS;
+        const size_t chunk_seconds = env_size("PARAKEET_CLI_CHUNK_SECONDS", default_chunk_seconds);
+        const size_t chunk_frames = std::max<size_t>(1, chunk_seconds * TARGET_SAMPLE_RATE);
 
         std::cerr << "loading parakeet.cpp model: " << model_path << "\n";
         std::unique_ptr<pk::Model> model = pk::Model::load(model_path);
@@ -240,11 +269,24 @@ int main(int argc, char** argv) {
                 full_text += transcription.text;
             }
             const float chunk_start = static_cast<float>(offset) / static_cast<float>(TARGET_SAMPLE_RATE);
+            if (text_output) {
+                const size_t start_seconds = offset / TARGET_SAMPLE_RATE;
+                const size_t end_seconds = (offset + count + TARGET_SAMPLE_RATE - 1) / TARGET_SAMPLE_RATE;
+                if (!transcription.text.empty()) {
+                    std::cout << "[" << timestamp(start_seconds) << "-" << timestamp(end_seconds) << "] " << transcription.text << "\n";
+                }
+                continue;
+            }
             for (pk::Word word : transcription.words) {
                 word.start += chunk_start;
                 word.end += chunk_start;
                 words.push_back(std::move(word));
             }
+        }
+
+        if (text_output) {
+            pk::shutdown_backend();
+            return 0;
         }
 
         std::cout << "{\"text\":\"" << json_escape(full_text) << "\",\"words\":[";
