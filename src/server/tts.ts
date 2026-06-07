@@ -14,6 +14,7 @@ const workerOutputAudioDone = 4;
 const workerOutputError = 5;
 const frameHeaderBytes = 9;
 const defaultRustTtsModelRepo = "mlx-community/Qwen3-TTS-12Hz-0.6B-Base-6bit";
+const defaultCppTtsModelRepo = "badlogicgames/qwen3-tts-0.6b-q8_0-gguf";
 const ignoredHuggingFaceFiles = new Set([".gitattributes", "README.md"]);
 const requiredRustTtsModelFiles = [
 	"config.json",
@@ -22,8 +23,9 @@ const requiredRustTtsModelFiles = [
 	"merges.txt",
 	"speech_tokenizer/model.safetensors",
 ] as const;
+const requiredCppTtsModelFiles = ["qwen3-tts-0.6b-q8_0.gguf", "qwen3-tts-tokenizer-f16.gguf"] as const;
 
-type TtsWorkerKind = "disabled" | "python" | "rust";
+type TtsWorkerKind = "disabled" | "python" | "rust" | "cpp";
 
 export interface TtsServiceDeps {
 	workerKind: string;
@@ -31,6 +33,8 @@ export interface TtsServiceDeps {
 	pythonWorkerPath: string;
 	rustWorkerPath: string | undefined;
 	rustModelPath: string | undefined;
+	cppWorkerPath: string | undefined;
+	cppModelPath: string | undefined;
 	logger: Logger;
 }
 
@@ -97,8 +101,8 @@ function decodeUtf8(payload: Uint8Array): string {
 }
 
 function parseWorkerKind(value: string): TtsWorkerKind {
-	if (value === "disabled" || value === "python" || value === "rust") return value;
-	throw new Error(`QWEN3_TTS_WORKER must be disabled, python, or rust, got ${value}`);
+	if (value === "disabled" || value === "python" || value === "rust" || value === "cpp") return value;
+	throw new Error(`QWEN3_TTS_WORKER must be disabled, python, rust, or cpp, got ${value}`);
 }
 
 function shouldLogQwen3Line(line: string): boolean {
@@ -132,8 +136,8 @@ async function hasUsableFile(path: string): Promise<boolean> {
 	}
 }
 
-async function hasRequiredRustTtsModelFiles(modelDir: string): Promise<boolean> {
-	for (const file of requiredRustTtsModelFiles) {
+async function hasRequiredModelFiles(modelDir: string, files: readonly string[]): Promise<boolean> {
+	for (const file of files) {
 		if (!(await hasUsableFile(join(modelDir, file)))) return false;
 	}
 	return true;
@@ -206,22 +210,27 @@ async function cleanupStaleDownloads(dir: string): Promise<void> {
 	}
 }
 
-async function ensureRustTtsModel(modelDir: string, logger: Logger): Promise<void> {
+async function ensureHuggingFaceModel(
+	modelDir: string,
+	repo: string,
+	requiredFiles: readonly string[],
+	label: string,
+	logger: Logger,
+): Promise<void> {
 	await mkdir(modelDir, { recursive: true });
 	await cleanupStaleDownloads(modelDir);
-	if (await hasRequiredRustTtsModelFiles(modelDir)) return;
+	if (await hasRequiredModelFiles(modelDir, requiredFiles)) return;
 
-	const repo = process.env.QWEN3_TTS_RUST_MODEL_REPO ?? defaultRustTtsModelRepo;
-	logger.log(`provisioning Rust Qwen3 TTS model ${repo} into ${modelDir}`);
+	logger.log(`provisioning ${label} model ${repo} into ${modelDir}`);
 	const files = (await listHuggingFaceFiles(repo)).filter((file) => !ignoredHuggingFaceFiles.has(file));
 	for (const file of files) {
 		const path = join(modelDir, file);
 		if (await hasUsableFile(path)) continue;
-		await downloadFile({ url: huggingFaceFileUrl(repo, file), path, label: `Qwen3 TTS model file ${file}` }, logger);
+		await downloadFile({ url: huggingFaceFileUrl(repo, file), path, label: `${label} model file ${file}` }, logger);
 	}
 
-	if (!(await hasRequiredRustTtsModelFiles(modelDir))) {
-		throw new Error(`Rust Qwen3 TTS model is incomplete after download: ${modelDir}`);
+	if (!(await hasRequiredModelFiles(modelDir, requiredFiles))) {
+		throw new Error(`${label} model is incomplete after download: ${modelDir}`);
 	}
 }
 
@@ -387,6 +396,15 @@ export function createTtsService(deps: TtsServiceDeps): TtsService {
 				label: `${deps.pythonCommand} ${directArgs.join(" ")}`,
 			};
 		}
+		if (workerKind === "cpp") {
+			if (!deps.cppWorkerPath) throw new Error("QWEN3_TTS_CPP_WORKER_PATH is required when QWEN3_TTS_WORKER=cpp");
+			if (!existsSync(deps.cppWorkerPath)) {
+				throw new Error(`C++ Qwen3 TTS worker binary missing: ${deps.cppWorkerPath}.`);
+			}
+			if (!deps.cppModelPath) throw new Error("QWEN3_TTS_CPP_MODEL_PATH is required when QWEN3_TTS_WORKER=cpp");
+			const args = [...commonArgs, "--model-name", deps.cppModelPath];
+			return { command: deps.cppWorkerPath, args, label: `${deps.cppWorkerPath} ${args.join(" ")}` };
+		}
 		if (!deps.rustWorkerPath) throw new Error("QWEN3_TTS_RUST_WORKER_PATH is required when QWEN3_TTS_WORKER=rust");
 		if (!existsSync(deps.rustWorkerPath)) {
 			throw new Error(`Rust Qwen3 TTS worker binary missing: ${deps.rustWorkerPath}. Run npm run build:tts-rust.`);
@@ -402,7 +420,12 @@ export function createTtsService(deps: TtsServiceDeps): TtsService {
 		if (workerKind === "rust") {
 			const rustModelPath = deps.rustModelPath ?? process.env.QWEN3_TTS_MODEL_NAME;
 			if (!rustModelPath) throw new Error("QWEN3_TTS_RUST_MODEL_PATH is required when QWEN3_TTS_WORKER=rust");
-			await ensureRustTtsModel(rustModelPath, logger);
+			const repo = process.env.QWEN3_TTS_RUST_MODEL_REPO ?? defaultRustTtsModelRepo;
+			await ensureHuggingFaceModel(rustModelPath, repo, requiredRustTtsModelFiles, "Rust Qwen3 TTS", logger);
+		} else if (workerKind === "cpp") {
+			if (!deps.cppModelPath) throw new Error("QWEN3_TTS_CPP_MODEL_PATH is required when QWEN3_TTS_WORKER=cpp");
+			const repo = process.env.QWEN3_TTS_CPP_MODEL_REPO ?? defaultCppTtsModelRepo;
+			await ensureHuggingFaceModel(deps.cppModelPath, repo, requiredCppTtsModelFiles, "C++ Qwen3 TTS", logger);
 		}
 		const { command, args, label } = workerCommand();
 		logger.log(`starting Qwen3 TTS ${workerKind} worker: ${label}`);

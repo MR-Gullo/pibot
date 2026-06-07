@@ -15,7 +15,7 @@ function parseArgs(argv) {
 		outDir: "/tmp/qwen3tts-bench",
 		mlxBin: "native/qwen3_tts_rs/target/release/qwen3-tts",
 		mlxModel: `${process.env.HOME}/models/qwen3-tts-12hz-0.6b-base-6bit`,
-		ggmlBin: "native/qwen3-tts.cpp/build-metal-coreml/qwen3-tts-cli",
+		ggmlBin: "native/qwen3-tts.cpp/build/qwen3-tts-cli",
 		ggmlModel: "native/qwen3-tts.cpp/models",
 		temperature: "0",
 		topK: "50",

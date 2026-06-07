@@ -78,6 +78,8 @@ const tts = createTtsService({
 	pythonWorkerPath: serverConfig.qwen3TtsPythonWorkerPath,
 	rustWorkerPath: serverConfig.qwen3TtsRustWorkerPath,
 	rustModelPath: serverConfig.qwen3TtsRustModelPath,
+	cppWorkerPath: serverConfig.qwen3TtsCppWorkerPath,
+	cppModelPath: serverConfig.qwen3TtsCppModelPath,
 	logger,
 });
 const stt = createSttService({
