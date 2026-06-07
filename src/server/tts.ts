@@ -243,6 +243,7 @@ export function createTtsService(deps: TtsServiceDeps): TtsService {
 	const qwen3RefTextFile = process.env.QWEN3_TTS_REF_TEXT_FILE ?? "data/voices/elevenlabs-pibot-reference-de.txt";
 	const qwen3Language = process.env.QWEN3_TTS_LANGUAGE ?? "de";
 	const qwen3OutputSampleRate = envNumber("QWEN3_TTS_OUTPUT_SAMPLE_RATE", 24000);
+	const qwen3Blocksize = envNumber("QWEN3_TTS_BLOCKSIZE", Math.round(qwen3OutputSampleRate * 0.2));
 	const qwen3Temperature = envNumber("QWEN3_TTS_TEMPERATURE", 0.7);
 	const qwen3TopK = envNumber("QWEN3_TTS_TOP_K", 30);
 	const qwen3Seed = process.env.QWEN3_TTS_SEED ?? "1234";
@@ -255,6 +256,7 @@ export function createTtsService(deps: TtsServiceDeps): TtsService {
 	let worker: ChildProcess | undefined;
 	let stdoutBuffer = Buffer.alloc(0);
 	let nextRequestId = 1;
+	let lastServedUserId: string | undefined;
 	let activeRequest: ActiveRequest | undefined;
 	let resolveReady: (() => void) | undefined;
 	let rejectReady: ((error: Error) => void) | undefined;
@@ -287,10 +289,19 @@ export function createTtsService(deps: TtsServiceDeps): TtsService {
 		turn.callbacks.onError(message);
 	}
 
+	function takeNextQueuedRequest(): QueuedRequest | undefined {
+		if (queue.length === 0) return undefined;
+		if (!lastServedUserId) return queue.shift();
+		const nextUserIndex = queue.findIndex((request) => request.userId !== lastServedUserId);
+		if (nextUserIndex < 0) return queue.shift();
+		return queue.splice(nextUserIndex, 1)[0];
+	}
+
 	function pump(): void {
 		if (activeRequest) return;
-		const request = queue.shift();
+		const request = takeNextQueuedRequest();
 		if (!request) return;
+		lastServedUserId = request.userId;
 		activeRequest = { ...request, cancelled: false };
 		try {
 			sendFrame(workerInputSpeak, request.id, textEncoder.encode(request.text));
@@ -378,6 +389,8 @@ export function createTtsService(deps: TtsServiceDeps): TtsService {
 			qwen3Language,
 			"--output-sample-rate",
 			String(qwen3OutputSampleRate),
+			"--blocksize",
+			String(qwen3Blocksize),
 			"--temperature",
 			String(qwen3Temperature),
 			"--top-k",

@@ -1,7 +1,7 @@
 import type { RobotRpcMap } from "../../types.js";
 import type { ClientLogger } from "../logger.js";
 
-const pcmInitialPrebufferSeconds = 0.2;
+const pcmInitialPrebufferSeconds = 0.4;
 const pcmScheduleLeadSeconds = 0.02;
 
 interface ActiveSpeech {
@@ -15,12 +15,15 @@ interface ActiveSpeech {
 interface ActivePcmStream {
 	generation: number;
 	sampleRate: number;
-	nextPlayTime: number;
+	nextPlayTime: number | undefined;
 	pendingSources: number;
 	doneRequested: boolean;
 	finishResolve: (() => void) | undefined;
 	nodes: AudioNode[];
 	cleanup: () => void;
+	lastChunkWallTime: number | undefined;
+	underruns: number;
+	chunks: number;
 }
 
 export interface SpeechTool {
@@ -369,12 +372,15 @@ export function createSpeechTool(deps: {
 		activePcmStream = {
 			generation: ++ttsGeneration,
 			sampleRate,
-			nextPlayTime: context.currentTime + pcmInitialPrebufferSeconds,
+			nextPlayTime: undefined,
 			pendingSources: 0,
 			doneRequested: false,
 			finishResolve: undefined,
 			nodes: [highpass, lowpass, presence, compressor, output, playbackTap, silentTapOutput, analyser],
 			cleanup: startFaceAmpLoop(analyser),
+			lastChunkWallTime: undefined,
+			underruns: 0,
+			chunks: 0,
 		};
 		deps.onSpeakingChange(true);
 		deps.setMicInputBlockedUntil(0);
@@ -389,6 +395,18 @@ export function createSpeechTool(deps: {
 		const audioBuffer = audioContext.createBuffer(1, sampleCount, stream.sampleRate);
 		const channel = audioBuffer.getChannelData(0);
 		for (let index = 0; index < sampleCount; index++) channel[index] = view.getInt16(index * 2, true) / 32768;
+		const now = performance.now();
+		stream.chunks++;
+		const arrivalGapMs = stream.lastChunkWallTime === undefined ? 0 : now - stream.lastChunkWallTime;
+		stream.lastChunkWallTime = now;
+		if (stream.nextPlayTime === undefined)
+			stream.nextPlayTime = audioContext.currentTime + pcmInitialPrebufferSeconds;
+		const queuedMs = (stream.nextPlayTime - audioContext.currentTime) * 1000;
+		if (stream.chunks === 1 || queuedMs < 50 || arrivalGapMs > 250) {
+			logger.log(
+				`Qwen3 PCM chunk #${stream.chunks} bytes=${pcm.byteLength} durationMs=${(audioBuffer.duration * 1000).toFixed(1)} queuedMs=${queuedMs.toFixed(1)} arrivalGapMs=${arrivalGapMs.toFixed(1)} pending=${stream.pendingSources}`,
+			);
+		}
 		const source = audioContext.createBufferSource();
 		source.buffer = audioBuffer;
 		source.connect(stream.nodes[0] ?? audioContext.destination);
@@ -398,6 +416,13 @@ export function createSpeechTool(deps: {
 			stream.pendingSources--;
 			maybeFinishPcmStream(stream);
 		};
+		const underrunMs = (audioContext.currentTime + pcmScheduleLeadSeconds - stream.nextPlayTime) * 1000;
+		if (underrunMs > 0) {
+			stream.underruns++;
+			logger.log(
+				`Qwen3 PCM underrun #${stream.underruns}: lateByMs=${underrunMs.toFixed(1)} chunk=${stream.chunks} arrivalGapMs=${arrivalGapMs.toFixed(1)}`,
+			);
+		}
 		const startAt = Math.max(stream.nextPlayTime, audioContext.currentTime + pcmScheduleLeadSeconds);
 		source.start(startAt);
 		stream.nextPlayTime = startAt + audioBuffer.duration;
