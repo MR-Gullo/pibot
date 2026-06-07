@@ -8,7 +8,7 @@ Pipi is a smartphone robot that can talk, remember things, take photos, and driv
 - Linux x86_64 is supported for LLM and STT; TTS is disabled by default on non-macOS.
 - The default local model set needs about 8-10 GB of unified memory at runtime.
 - Node.js 22+, CMake, pkg-config, C/C++ build tools, and `tar`.
-- Rust, Xcode command line tools, Xcode Metal Toolchain, and Opus are required only for the macOS Qwen3-TTS worker.
+- Xcode command line tools, Xcode Metal Toolchain, and Opus are required for the macOS Qwen3-TTS worker. Rust is only needed for the optional Rust/MLX worker (`QWEN3_TTS_WORKER=rust`).
 
 macOS native build prerequisites:
 
@@ -65,10 +65,16 @@ Pipi runs local LLM, STT, and TTS models. Missing default models are downloaded 
   - Downloaded into: `~/models/whisper-vad/ggml-silero-v6.2.0.bin`.
   - Override with `PARAKEET_CPP_MODEL_PATH`/`PARAKEET_CPP_MODEL_FILE` and `SILERO_VAD_GGML_MODEL_PATH`/`SILERO_VAD_GGML_MODEL_FILE`.
 
-- TTS: Qwen3-TTS 0.6B Base 6-bit MLX on macOS/Apple Silicon.
-  - Model: `mlx-community/Qwen3-TTS-12Hz-0.6B-Base-6bit`
-  - Downloaded into: `~/models/qwen3-tts-12hz-0.6b-base-6bit`
-  - Disabled by default on Linux because this worker depends on Apple MLX.
+- TTS default: native C++/GGML Qwen3-TTS worker (Metal) on macOS/Apple Silicon (`QWEN3_TTS_WORKER=cpp`).
+  - Built with `npm run build:tts-cpp` (also part of `npm run build:native`).
+  - Model: `badlogicgames/qwen3-tts-0.6b-q8_0-gguf` (Q8_0 GGUF + tokenizer).
+  - Downloaded into: `~/models/qwen3-tts-0.6b-q8_0-gguf`.
+  - Override with `QWEN3_TTS_CPP_WORKER_PATH` / `QWEN3_TTS_CPP_MODEL_PATH` / `QWEN3_TTS_CPP_MODEL_REPO`.
+  - Uses x-vector voice cloning. Disabled by default on Linux/Windows (Vulkan port planned).
+- TTS alternative: Rust Qwen3-TTS 0.6B Base 6-bit MLX (`QWEN3_TTS_WORKER=rust`).
+  - Better voice cloning (ICL), but requires Rust + Apple MLX; build with `npm run build:tts-rust`.
+  - Model: `mlx-community/Qwen3-TTS-12Hz-0.6B-Base-6bit`, downloaded into `~/models/qwen3-tts-12hz-0.6b-base-6bit`.
+- Select the TTS engine with `QWEN3_TTS_WORKER` (`cpp` default on macOS, `rust`, `python`, or `disabled`).
 
 ## Commands
 
@@ -76,7 +82,8 @@ Pipi runs local LLM, STT, and TTS models. Missing default models are downloaded 
 npm run dev             # start the development server
 npm run build:native    # build STT and TTS native workers
 npm run build:stt-parakeet-cpp # build the native parakeet.cpp STT worker
-npm run build:tts-rust  # build only the Rust Qwen3-TTS worker
+npm run build:tts-cpp   # build only the native C++/Metal Qwen3-TTS worker (default)
+npm run build:tts-rust  # build only the optional Rust/MLX Qwen3-TTS worker
 npm run check           # format/lint/typecheck/build client
 npm run bench:stt       # benchmark STT worker
 npm run bench:tts       # benchmark TTS worker
