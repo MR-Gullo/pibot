@@ -10,6 +10,7 @@ import {
 	type Model,
 	type TextContent,
 } from "@earendil-works/pi-ai";
+import { readFileSync } from "node:fs";
 import type { LocalLlmConfig, LocalLlmId } from "./llama.js";
 import { localLlmConfigs } from "./llama.js";
 import type { Logger } from "./logger.js";
@@ -67,8 +68,24 @@ function formatMemories(memories: string[]): string {
 	return memories.map((memory, index) => `${index}: ${memory}`).join("\n");
 }
 
-const robotInstructions =
+const defaultRobotInstructions =
 	"Du bist das Gehirn eines kleinen Roboters mit Smartphone. Antworte immer auf Deutsch. Sei verspielt, freundlich und sicher. Dein Text wird direkt an eine Plaintext-Sprachausgabe gesendet: Verwende kein Markdown, keine Listen, keine Codeblöcke, keine Überschriften und keine Emojis. Schreibe Zahlen so, dass eine Sprachausgabe sie natürlich vorliest: vermeide Ziffern mit Tausender- oder Dezimaltrennzeichen wie 6.400 oder 1,23; schreibe stattdessen ausgeschriebene oder eindeutig sprechbare Formen wie sechstausendvierhundert, eins Komma zwei drei oder one point two three, passend zur Antwortsprache. Nutze Bewegungswerkzeuge nur für kurze Dauer. Die Bewegungswerkzeuge stoppen automatisch nach ihrer Dauer. Die Hardware kann nur vorwärts fahren und sich gegen den Uhrzeigersinn drehen; rückwärts und rechts gibt es nicht. Für ungefähre Drehwinkel nutze turn_left_degrees. Wenn eine Aufgabe ein Werkzeug erfordert, rufe es sofort per Tool-Call auf, bevor du antwortest; kündige es nicht nur an. Nutze spotify_search für Musik, Kinderlieder, Playlists, Podcasts oder Hörbücher, wenn du die exakte Spotify-URI noch nicht kennst; fordere dabei mindestens fünf Ergebnisse an, außer der Nutzer verlangt ausdrücklich weniger; spiele danach die gewünschte URI mit spotify_play ab. Spotify itemType-Werte sind exakt track, album, playlist, show, episode oder audiobook; für Podcasts nutze show, für Podcast-Folgen episode, niemals podcast. Nutze spotify_control zum Pausieren, Fortsetzen, Überspringen oder Prüfen der aktuellen Wiedergabe. Wenn du aktuelle Fakten oder Internet-Informationen brauchst, nutze web_search. Wenn du Details aus einem gefundenen Treffer brauchst, nutze fetch_page_content mit der URL.";
+
+function loadRobotInstructions(): string {
+	const promptPath = process.env.PIBOT_PROMPT_PATH;
+	if (promptPath) return readFileSync(promptPath, "utf8").trim();
+
+	const configPath = process.env.PIBOT_CONFIG;
+	if (!configPath) return defaultRobotInstructions;
+
+	const config = JSON.parse(readFileSync(configPath, "utf8")) as { prompt?: unknown };
+	if (typeof config.prompt !== "string" || config.prompt.trim().length === 0) {
+		throw new Error(`PIBOT_CONFIG missing non-empty prompt: ${configPath}`);
+	}
+	return config.prompt.trim();
+}
+
+const robotInstructions = loadRobotInstructions();
 
 const memoryToolInstructions = `Memory-Werkzeug:
 - Nutze das Memory-Werkzeug über die Tool-Calling-Schnittstelle, nicht als Text in deiner Antwort.
