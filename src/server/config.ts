@@ -34,6 +34,8 @@ export const serverConfig = {
 	qwen3TtsPythonCommand: process.env.QWEN3_TTS_PYTHON_COMMAND ?? "uv",
 	qwen3TtsPythonWorkerPath:
 		process.env.QWEN3_TTS_PYTHON_WORKER_PATH ?? resolve(serverDir, "../../scripts/qwen3-tts-worker.py"),
+	kokoroTtsPythonWorkerPath:
+		process.env.KOKORO_TTS_PYTHON_WORKER_PATH ?? resolve(serverDir, "../../scripts/kokoro-tts-worker.py"),
 	qwen3TtsRustWorkerPath:
 		process.env.QWEN3_TTS_RUST_WORKER_PATH ??
 		resolve(

@@ -56,6 +56,8 @@ const auth = new UserAuthService({
 	adminPassword: serverConfig.adminPassword,
 	secureCookies: serverConfig.secureCookies,
 });
+const defaultUser = await auth.ensureDefaultUser();
+if (defaultUser) serverLogger.log(`created default login user: ${defaultUser.name}`);
 const userRuntimes = new Map<string, UserRuntime>();
 const localLlmConfig = localLlmConfigs[serverConfig.localLlm];
 const llama = await createLlamaService({
@@ -76,6 +78,7 @@ const tts = createTtsService({
 	workerKind: serverConfig.qwen3TtsWorker,
 	pythonCommand: serverConfig.qwen3TtsPythonCommand,
 	pythonWorkerPath: serverConfig.qwen3TtsPythonWorkerPath,
+	kokoroWorkerPath: serverConfig.kokoroTtsPythonWorkerPath,
 	rustWorkerPath: serverConfig.qwen3TtsRustWorkerPath,
 	rustModelPath: serverConfig.qwen3TtsRustModelPath,
 	cppWorkerPath: serverConfig.qwen3TtsCppWorkerPath,
@@ -421,7 +424,7 @@ async function handleHarnessEvent(runtime: UserRuntime, event: RobotHarnessEvent
 	}
 	if (event.type === "assistant_start") {
 		runtime.activeAssistantText = "";
-		runtime.activeChunker = createSentenceChunker({ sentencesPerChunk: 1 });
+		runtime.activeChunker = createSentenceChunker({ sentencesPerChunk: 2 });
 		runtime.ttsStartedForTurn = false;
 		setRobotState(runtime, { phase: "thinking", assistantText: "" });
 	}

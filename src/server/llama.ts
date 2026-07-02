@@ -32,6 +32,17 @@ export const localLlmConfigs = {
 		input: ["text", "image"],
 		chatTemplateKwargs: '{"enable_thinking":false}',
 	},
+	qwen35hauhau4b: {
+		name: "Qwen3.5 4B HauhauCS Aggressive Q4 llama.cpp Local",
+		modelFile: "Qwen3.5-4B-Uncensored-HauhauCS-Aggressive-Q4_K_M.gguf",
+		mmprojFile: "mmproj-Qwen3.5-4B-Uncensored-HauhauCS-Aggressive-BF16.gguf",
+		downloadBaseUrl: "https://huggingface.co/HauhauCS/Qwen3.5-4B-Uncensored-HauhauCS-Aggressive/resolve/main",
+		defaultModelDirName: "qwen3.5-4b-hauhaucs-aggressive",
+		contextWindow: 32768,
+		maxTokens: 512,
+		input: ["text", "image"],
+		chatTemplateKwargs: '{"enable_thinking":false}',
+	},
 	gemma: {
 		name: "Gemma 4 26B A4B MoE Q4 llama.cpp Local",
 		modelFile: "gemma-4-26B-A4B-it-Q4_K_M.gguf",
@@ -60,10 +71,16 @@ export type LocalLlmId = keyof typeof localLlmConfigs;
 
 export function parseLocalLlmId(value: string | undefined): LocalLlmId {
 	const normalized = value?.toLowerCase();
-	if (!normalized || normalized === "gemma") return "gemma";
+	if (!normalized) return "qwen35hauhau4b";
+	if (normalized === "gemma") return "gemma";
 	if (normalized === "gemma12b" || normalized === "gemma-12b") return "gemma12b";
 	if (normalized === "qwen") return "qwen";
-	throw new Error(`Unknown LOCAL_LLM: ${value}. Expected qwen, gemma, or gemma12b.`);
+	if (
+		normalized === "qwen35hauhau4b" ||
+		normalized === "qwen35-hauhau-4b" ||
+		normalized === "qwen3.5-4b-hauhau"
+	) return "qwen35hauhau4b";
+	throw new Error(`Unknown LOCAL_LLM: ${value}. Expected qwen, qwen35hauhau4b, gemma, or gemma12b.`);
 }
 
 export interface LlamaServiceDeps {

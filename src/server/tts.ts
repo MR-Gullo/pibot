@@ -25,12 +25,13 @@ const requiredRustTtsModelFiles = [
 ] as const;
 const requiredCppTtsModelFiles = ["qwen3-tts-0.6b-q8_0.gguf", "qwen3-tts-tokenizer-f16.gguf"] as const;
 
-type TtsWorkerKind = "disabled" | "python" | "rust" | "cpp";
+type TtsWorkerKind = "disabled" | "python" | "rust" | "cpp" | "kokoro";
 
 export interface TtsServiceDeps {
 	workerKind: string;
 	pythonCommand: string;
 	pythonWorkerPath: string;
+	kokoroWorkerPath: string;
 	rustWorkerPath: string | undefined;
 	rustModelPath: string | undefined;
 	cppWorkerPath: string | undefined;
@@ -63,6 +64,8 @@ interface QueuedRequest {
 
 interface ActiveRequest extends QueuedRequest {
 	cancelled: boolean;
+	bufferedSampleRate: number | undefined;
+	bufferedChunks: Uint8Array[];
 }
 
 interface TtsTurn {
@@ -101,8 +104,9 @@ function decodeUtf8(payload: Uint8Array): string {
 }
 
 function parseWorkerKind(value: string): TtsWorkerKind {
-	if (value === "disabled" || value === "python" || value === "rust" || value === "cpp") return value;
-	throw new Error(`QWEN3_TTS_WORKER must be disabled, python, rust, or cpp, got ${value}`);
+	if (value === "disabled" || value === "python" || value === "rust" || value === "cpp" || value === "kokoro")
+		return value;
+	throw new Error(`QWEN3_TTS_WORKER must be disabled, python, rust, cpp, or kokoro, got ${value}`);
 }
 
 function shouldLogQwen3Line(line: string): boolean {
@@ -239,14 +243,22 @@ export function createTtsService(deps: TtsServiceDeps): TtsService {
 	if (workerKind === "disabled") return createDisabledTtsService(deps.logger);
 
 	const qwen3ModelName = process.env.QWEN3_TTS_MODEL_NAME ?? "mlx-community/Qwen3-TTS-12Hz-0.6B-Base-6bit";
-	const qwen3RefAudio = process.env.QWEN3_TTS_REF_AUDIO ?? "data/voices/elevenlabs-pibot-reference-de.wav";
-	const qwen3RefTextFile = process.env.QWEN3_TTS_REF_TEXT_FILE ?? "data/voices/elevenlabs-pibot-reference-de.txt";
-	const qwen3Language = process.env.QWEN3_TTS_LANGUAGE ?? "de";
+	const qwen3RefAudio =
+		process.env.QWEN3_TTS_REF_AUDIO ?? "data/voices/qwen3-customvoice-1.7b/qwen3-customvoice-1.7b-zh-dylan_000.wav";
+	const qwen3RefTextFile =
+		process.env.QWEN3_TTS_REF_TEXT_FILE ?? "data/voices/qwen3-customvoice-1.7b/qwen3-customvoice-1.7b-zh-dylan_000.txt";
+	const qwen3Language = process.env.QWEN3_TTS_LANGUAGE ?? "zh";
 	const qwen3OutputSampleRate = envNumber("QWEN3_TTS_OUTPUT_SAMPLE_RATE", 24000);
-	const qwen3Blocksize = envNumber("QWEN3_TTS_BLOCKSIZE", Math.round(qwen3OutputSampleRate * 0.2));
+	const qwen3Blocksize = envNumber("QWEN3_TTS_BLOCKSIZE", Math.round(qwen3OutputSampleRate * 1));
 	const qwen3Temperature = envNumber("QWEN3_TTS_TEMPERATURE", 0.7);
 	const qwen3TopK = envNumber("QWEN3_TTS_TOP_K", 30);
 	const qwen3Seed = process.env.QWEN3_TTS_SEED ?? "1234";
+	const qwen3Buffered = process.env.QWEN3_TTS_BUFFERED !== "0";
+	const kokoroRepoId = process.env.KOKORO_TTS_REPO_ID ?? "hexgrad/Kokoro-82M";
+	const kokoroLangCode = process.env.KOKORO_TTS_LANG_CODE ?? "z";
+	const kokoroVoice = process.env.KOKORO_TTS_VOICE ?? "zm_yunjian";
+	const kokoroSpeed = envNumber("KOKORO_TTS_SPEED", 0.9);
+	const kokoroDevice = process.env.KOKORO_TTS_DEVICE ?? "cpu";
 
 	const logger = deps.logger.tag("tts");
 	const qwen3Logger = logger.tag("qwen3");
@@ -302,7 +314,7 @@ export function createTtsService(deps: TtsServiceDeps): TtsService {
 		const request = takeNextQueuedRequest();
 		if (!request) return;
 		lastServedUserId = request.userId;
-		activeRequest = { ...request, cancelled: false };
+		activeRequest = { ...request, cancelled: false, bufferedSampleRate: undefined, bufferedChunks: [] };
 		try {
 			sendFrame(workerInputSpeak, request.id, textEncoder.encode(request.text));
 		} catch (error) {
@@ -339,18 +351,33 @@ export function createTtsService(deps: TtsServiceDeps): TtsService {
 			return;
 		}
 		if (type === workerOutputAudioStart) {
+			const sampleRate = payload.byteLength >= 4 ? Buffer.from(payload).readUInt32LE(0) : qwen3OutputSampleRate;
+			if (qwen3Buffered) {
+				request.bufferedSampleRate = sampleRate;
+				return;
+			}
 			if (!turn.streamStarted) {
 				turn.streamStarted = true;
-				const sampleRate = payload.byteLength >= 4 ? Buffer.from(payload).readUInt32LE(0) : qwen3OutputSampleRate;
 				turn.callbacks.onStart(sampleRate);
 			}
 			return;
 		}
 		if (type === workerOutputAudioChunk) {
+			if (qwen3Buffered) {
+				request.bufferedChunks.push(new Uint8Array(payload));
+				return;
+			}
 			turn.callbacks.onAudio(payload);
 			return;
 		}
 		if (type === workerOutputAudioDone) {
+			if (qwen3Buffered && request.bufferedChunks.length > 0) {
+				if (!turn.streamStarted) {
+					turn.streamStarted = true;
+					turn.callbacks.onStart(request.bufferedSampleRate ?? qwen3OutputSampleRate);
+				}
+				for (const chunk of request.bufferedChunks) turn.callbacks.onAudio(chunk);
+			}
 			turn.pendingRequests = Math.max(0, turn.pendingRequests - 1);
 			activeRequest = undefined;
 			finishTurnIfIdle(request.userId);
@@ -401,6 +428,52 @@ export function createTtsService(deps: TtsServiceDeps): TtsService {
 			const directArgs = [deps.pythonWorkerPath, ...commonArgs, "--model-name", qwen3ModelName];
 			if (deps.pythonCommand === "uv") {
 				const args = ["run", "--no-project", "--with", "speech-to-speech==0.2.9", "python", ...directArgs];
+				return { command: deps.pythonCommand, args, label: `${deps.pythonCommand} ${args.join(" ")}` };
+			}
+			return {
+				command: deps.pythonCommand,
+				args: directArgs,
+				label: `${deps.pythonCommand} ${directArgs.join(" ")}`,
+			};
+		}
+		if (workerKind === "kokoro") {
+			const directArgs = [
+				deps.kokoroWorkerPath,
+				"--serve",
+				"--repo-id",
+				kokoroRepoId,
+				"--lang-code",
+				kokoroLangCode,
+				"--voice",
+				kokoroVoice,
+				"--speed",
+				String(kokoroSpeed),
+				"--device",
+				kokoroDevice,
+				"--output-sample-rate",
+				String(qwen3OutputSampleRate),
+				"--blocksize",
+				String(qwen3Blocksize),
+			];
+			if (deps.pythonCommand === "uv") {
+				const args = [
+					"run",
+					"--no-project",
+					"--with",
+					"kokoro>=0.9.2",
+					"--with",
+					"soundfile",
+					"--with",
+					"ordered-set",
+					"--with",
+					"pypinyin",
+					"--with",
+					"jieba",
+					"--with",
+					"cn2an",
+					"python",
+					...directArgs,
+				];
 				return { command: deps.pythonCommand, args, label: `${deps.pythonCommand} ${args.join(" ")}` };
 			}
 			return {

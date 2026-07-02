@@ -115,6 +115,12 @@ export class UserAuthService {
 		return (await this.loadUsers()).map(publicUser);
 	}
 
+	async ensureDefaultUser(): Promise<PublicUser | undefined> {
+		const users = await this.loadUsers();
+		if (users.length > 0) return undefined;
+		return this.addUser(this.options.adminUser, this.options.adminPassword);
+	}
+
 	async addUser(name: string, password: string): Promise<PublicUser> {
 		const normalized = normalizeUsername(name);
 		assertValidUsername(normalized);
